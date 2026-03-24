@@ -1,4 +1,5 @@
 pub mod http;
+pub mod query;
 pub mod schema;
 pub mod task;
 pub mod types;
