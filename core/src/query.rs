@@ -45,27 +45,26 @@ impl QTask {
 }
 
 impl Db {
-    pub fn list_tasks(&mut self, filter: TaskFilter) -> Result<Vec<Task>> {
-        let rows: Vec<QTask> = {
-            let txn = self.client.transaction(&self.database);
+    pub fn list_tasks(&self, filter: TaskFilter) -> Result<Vec<Task>> {
+        let rows: Vec<QTask> = self.database.transaction(|txn| {
             txn.query(|q| {
                 let t = q.join(schema::Task);
                 q.into_vec(QTaskSelect {
-                    external_id: t.external_id(),
-                    title: t.title(),
-                    description: t.description(),
-                    status: t.status(),
-                    priority: t.priority(),
-                    workspace: t.workspace(),
-                    deadline: t.deadline(),
-                    snooze_until: t.snooze_until(),
-                    planned_date: t.planned_date(),
-                    deleted_at: t.deleted_at(),
-                    created_at: t.created_at(),
-                    updated_at: t.updated_at(),
+                    external_id: &t.external_id,
+                    title: &t.title,
+                    description: &t.description,
+                    status: &t.status,
+                    priority: &t.priority,
+                    workspace: &t.workspace,
+                    deadline: &t.deadline,
+                    snooze_until: &t.snooze_until,
+                    planned_date: &t.planned_date,
+                    deleted_at: &t.deleted_at,
+                    created_at: &t.created_at,
+                    updated_at: &t.updated_at,
                 })
             })
-        };
+        });
 
         let today = Utc::now().date_naive();
 
@@ -138,7 +137,7 @@ impl Db {
         Ok(tasks)
     }
 
-    pub fn search(&mut self, query: &str, filter: TaskFilter) -> Result<Vec<Task>> {
+    pub fn search(&self, query: &str, filter: TaskFilter) -> Result<Vec<Task>> {
         let query_lower = query.to_lowercase();
         let mut tasks = self.list_tasks(filter)?;
         tasks.retain(|t| {

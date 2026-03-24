@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use rust_query::{Select, aggregate, optional, Update};
+use rust_query::{Select, aggregate, optional};
 
 use crate::schema;
 use crate::types::{AddTask, EditTask, Task, TaskId, TaskStatus};
@@ -46,202 +46,142 @@ impl TaskSelect {
 }
 
 impl Db {
-    pub fn add_task(&mut self, params: AddTask) -> Result<TaskId> {
+    pub fn add_task(&self, params: AddTask) -> Result<TaskId> {
         let now = Utc::now().to_rfc3339();
         let status = params.status.unwrap_or(TaskStatus::Idea).to_string();
+        let description = params.description.unwrap_or_default();
 
-        let mut txn = self.client.transaction_mut(&self.database);
+        self.database.transaction_mut(|txn| {
+            // Generate next external_id: max(external_id) + 1, or 1 if empty
+            let next_id: i64 = txn
+                .query_one(aggregate(|rows| {
+                    let task = rows.join(schema::Task);
+                    rows.max(&task.external_id)
+                }))
+                .map_or(1, |max| max + 1);
 
-        // Generate next external_id: max(external_id) + 1, or 1 if empty
-        let next_id: i64 = txn.query_one(aggregate(|rows| {
-            let task = rows.join(schema::Task);
-            rows.max(task.external_id())
-        })).map_or(1, |max| max + 1);
+            txn.insert(schema::Task {
+                external_id: next_id,
+                title: params.title.clone(),
+                description: description.clone(),
+                status: status.clone(),
+                priority: params.priority,
+                workspace: params.workspace.clone(),
+                deadline: params.deadline.clone(),
+                snooze_until: None,
+                planned_date: params.planned_date.clone(),
+                deleted_at: None,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })
+            .map_err(|_| anyhow::anyhow!("task with this external_id already exists"))?;
 
-        txn.insert(schema::Task {
-            external_id: next_id,
-            title: &*params.title,
-            description: &*params.description.unwrap_or_default(),
-            status: &*status,
-            priority: params.priority,
-            workspace: &*params.workspace,
-            deadline: params.deadline.as_deref(),
-            snooze_until: None::<&str>,
-            planned_date: params.planned_date.as_deref(),
-            deleted_at: None::<&str>,
-            created_at: &*now,
-            updated_at: &*now,
-        }).map_err(|_| anyhow::anyhow!("task with this external_id already exists"))?;
-
-        txn.commit();
-        Ok(next_id)
+            Ok(next_id)
+        })
     }
 
-    pub fn edit_task(&mut self, id: TaskId, params: EditTask) -> Result<()> {
+    pub fn edit_task(&self, id: TaskId, params: EditTask) -> Result<()> {
         let now = Utc::now().to_rfc3339();
 
-        let mut txn = self.client.transaction_mut(&self.database);
+        self.database.transaction_mut(|txn| {
+            let task_row = txn
+                .query_one(optional(|row| {
+                    let task = row.and(schema::Task.external_id(id));
+                    row.then(task)
+                }))
+                .ok_or_else(|| anyhow::anyhow!("task not found: {id}"))?;
 
-        let task_row = txn
-            .query_one(optional(|row| {
-                let task = row.and(schema::Task::unique(id));
-                row.then(task)
-            }))
-            .ok_or_else(|| anyhow::anyhow!("task not found: {id}"))?;
+            let mut task = txn.mutable(&task_row);
 
-        // Build update with only the fields that changed
-        let title_update = match &params.title {
-            Some(t) => Update::set(&**t),
-            None => Update::default(),
-        };
-        let description_update = match &params.description {
-            Some(d) => Update::set(&**d),
-            None => Update::default(),
-        };
-        let status_str;
-        let status_update = match &params.status {
-            Some(s) => {
-                status_str = s.to_string();
-                Update::set(&*status_str)
+            if let Some(t) = &params.title {
+                task.title = t.clone();
             }
-            None => Update::default(),
-        };
-        let priority_update = match params.priority {
-            Some(p) => Update::set(p),
-            None => Update::default(),
-        };
-        let workspace_update = match &params.workspace {
-            Some(w) => Update::set(&**w),
-            None => Update::default(),
-        };
-        let deadline_update = match &params.deadline {
-            Some(d) => Update::set(d.as_deref()),
-            None => Update::default(),
-        };
-        let snooze_update = match &params.snooze_until {
-            Some(s) => Update::set(s.as_deref()),
-            None => Update::default(),
-        };
-        let planned_date_update = match &params.planned_date {
-            Some(p) => Update::set(p.as_deref()),
-            None => Update::default(),
-        };
+            if let Some(d) = &params.description {
+                task.description = d.clone();
+            }
+            if let Some(s) = &params.status {
+                task.status = s.to_string();
+            }
+            if let Some(p) = params.priority {
+                task.priority = p;
+            }
+            if let Some(w) = &params.workspace {
+                task.workspace = w.clone();
+            }
+            if let Some(d) = &params.deadline {
+                task.deadline = d.clone();
+            }
+            if let Some(s) = &params.snooze_until {
+                task.snooze_until = s.clone();
+            }
+            if let Some(p) = &params.planned_date {
+                task.planned_date = p.clone();
+            }
+            task.updated_at = now.clone();
 
-        txn.update(
-            task_row,
-            schema::Task {
-                external_id: Update::default(),
-                title: title_update,
-                description: description_update,
-                status: status_update,
-                priority: priority_update,
-                workspace: workspace_update,
-                deadline: deadline_update,
-                snooze_until: snooze_update,
-                planned_date: planned_date_update,
-                deleted_at: Update::default(),
-                created_at: Update::default(),
-                updated_at: Update::set(&*now),
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("update conflict on task {id}"))?;
-
-        txn.commit();
-        Ok(())
+            Ok(())
+        })
     }
 
-    pub fn delete_task(&mut self, id: TaskId) -> Result<()> {
+    pub fn delete_task(&self, id: TaskId) -> Result<()> {
         let now = Utc::now().to_rfc3339();
 
-        let mut txn = self.client.transaction_mut(&self.database);
+        self.database.transaction_mut(|txn| {
+            let task_row = txn
+                .query_one(optional(|row| {
+                    let task = row.and(schema::Task.external_id(id));
+                    row.then(task)
+                }))
+                .ok_or_else(|| anyhow::anyhow!("task not found: {id}"))?;
 
-        let task_row = txn
-            .query_one(optional(|row| {
-                let task = row.and(schema::Task::unique(id));
-                row.then(task)
-            }))
-            .ok_or_else(|| anyhow::anyhow!("task not found: {id}"))?;
+            let mut task = txn.mutable(&task_row);
+            task.deleted_at = Some(now.clone());
+            task.updated_at = now.clone();
 
-        txn.update(
-            task_row,
-            schema::Task {
-                external_id: Update::default(),
-                title: Update::default(),
-                description: Update::default(),
-                status: Update::default(),
-                priority: Update::default(),
-                workspace: Update::default(),
-                deadline: Update::default(),
-                snooze_until: Update::default(),
-                planned_date: Update::default(),
-                deleted_at: Update::set(Some(&*now)),
-                created_at: Update::default(),
-                updated_at: Update::set(&*now),
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("update conflict on task {id}"))?;
-
-        txn.commit();
-        Ok(())
+            Ok(())
+        })
     }
 
-    pub fn snooze(&mut self, id: TaskId, until: chrono::NaiveDate) -> Result<()> {
+    pub fn snooze(&self, id: TaskId, until: chrono::NaiveDate) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let until_str = until.to_string();
 
-        let mut txn = self.client.transaction_mut(&self.database);
+        self.database.transaction_mut(|txn| {
+            let task_row = txn
+                .query_one(optional(|row| {
+                    let task = row.and(schema::Task.external_id(id));
+                    row.then(task)
+                }))
+                .ok_or_else(|| anyhow::anyhow!("task not found: {id}"))?;
 
-        let task_row = txn
-            .query_one(optional(|row| {
-                let task = row.and(schema::Task::unique(id));
-                row.then(task)
-            }))
-            .ok_or_else(|| anyhow::anyhow!("task not found: {id}"))?;
+            let mut task = txn.mutable(&task_row);
+            task.snooze_until = Some(until_str.clone());
+            task.updated_at = now.clone();
 
-        txn.update(
-            task_row,
-            schema::Task {
-                external_id: Update::default(),
-                title: Update::default(),
-                description: Update::default(),
-                status: Update::default(),
-                priority: Update::default(),
-                workspace: Update::default(),
-                deadline: Update::default(),
-                snooze_until: Update::set(Some(&*until_str)),
-                planned_date: Update::default(),
-                deleted_at: Update::default(),
-                created_at: Update::default(),
-                updated_at: Update::set(&*now),
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("update conflict on task {id}"))?;
-
-        txn.commit();
-        Ok(())
+            Ok(())
+        })
     }
 
-    pub fn get_task(&mut self, id: TaskId) -> Result<Option<Task>> {
-        let result: Option<TaskSelect> = {
-            let txn = self.client.transaction(&self.database);
+    pub fn get_task(&self, id: TaskId) -> Result<Option<Task>> {
+        let result: Option<TaskSelect> = self.database.transaction(|txn| {
             txn.query_one(optional(|row| {
-                let t = row.and(schema::Task::unique(id));
-                row.then(TaskSelectSelect {
-                    external_id: t.external_id(),
-                    title: t.title(),
-                    description: t.description(),
-                    status: t.status(),
-                    priority: t.priority(),
-                    workspace: t.workspace(),
-                    deadline: t.deadline(),
-                    snooze_until: t.snooze_until(),
-                    planned_date: t.planned_date(),
-                    deleted_at: t.deleted_at(),
-                    created_at: t.created_at(),
-                    updated_at: t.updated_at(),
+                let t = row.and(schema::Task.external_id(id));
+                row.then_select(TaskSelectSelect {
+                    external_id: &t.external_id,
+                    title: &t.title,
+                    description: &t.description,
+                    status: &t.status,
+                    priority: &t.priority,
+                    workspace: &t.workspace,
+                    deadline: &t.deadline,
+                    snooze_until: &t.snooze_until,
+                    planned_date: &t.planned_date,
+                    deleted_at: &t.deleted_at,
+                    created_at: &t.created_at,
+                    updated_at: &t.updated_at,
                 })
             }))
-        };
+        });
 
         match result {
             None => Ok(None),
@@ -272,8 +212,6 @@ mod tests {
         }
     }
 
-    /// rust-query 0.4 only allows one Config::open_in_memory() per process,
-    /// so all task CRUD tests share a single Db instance.
     #[test]
     fn test_task_crud() {
         let mut db = Db::open_in_memory().unwrap();

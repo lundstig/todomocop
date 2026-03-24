@@ -155,7 +155,7 @@ fn main() -> Result<()> {
     };
 
     let http: Arc<dyn HttpClient> = Arc::new(UreqHttpClient);
-    let mut db = Db::open(&db_path, http, config)?;
+    let db = Db::open(&db_path, http, config)?;
 
     match cli.command {
         Commands::Add {

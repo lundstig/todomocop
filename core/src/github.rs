@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use chrono::Utc;
-use rust_query::{optional, Select, Update};
+use rust_query::{optional, Select};
 
 use crate::schema;
 use crate::types::{GithubPrContextData, Task, TaskId};
@@ -38,48 +38,47 @@ struct GithubContextSelect {
 }
 
 impl Db {
-    pub fn link_github_pr(&mut self, task_id: TaskId, url: &str) -> Result<()> {
+    pub fn link_github_pr(&self, task_id: TaskId, url: &str) -> Result<()> {
         let (repo, number) = parse_github_pr_url(url)?;
         let now = Utc::now().to_rfc3339();
 
-        let mut txn = self.client.transaction_mut(&self.database);
+        self.database.transaction_mut(|txn| {
+            let task_row = txn
+                .query_one(optional(|row| {
+                    let task = row.and(schema::Task.external_id(task_id));
+                    row.then(task)
+                }))
+                .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))?;
 
-        let task_row = txn
-            .query_one(optional(|row| {
-                let task = row.and(schema::Task::unique(task_id));
-                row.then(task)
-            }))
-            .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))?;
+            txn.insert(schema::GithubPrContext {
+                task: task_row,
+                url: url.to_owned(),
+                repo: repo.clone(),
+                number,
+                state: "unknown".to_owned(),
+                last_refreshed: now.clone(),
+            })
+            .map_err(|_| anyhow::anyhow!("failed to insert GitHub PR context"))?;
 
-        txn.insert(schema::GithubPrContext {
-            task: task_row,
-            url,
-            repo: &repo,
-            number,
-            state: "unknown",
-            last_refreshed: &now,
+            Ok(())
         })
-        .map_err(|_| anyhow::anyhow!("failed to insert GitHub PR context"))?;
-
-        txn.commit();
-        Ok(())
     }
 
     /// Load the GithubPrContext for a given task (by external_id) if one exists.
-    pub(crate) fn load_github_context(&mut self, task_id: TaskId) -> Result<Option<GithubPrContextData>> {
-        let txn = self.client.transaction(&self.database);
-
-        let results: Vec<GithubContextSelect> = txn.query(|q| {
-            let task = q.join(schema::Task);
-            let ctx = q.join(schema::GithubPrContext);
-            q.filter(ctx.task().eq(&task));
-            q.filter(task.external_id().eq(task_id));
-            q.into_vec(GithubContextSelectSelect {
-                url: ctx.url(),
-                repo: ctx.repo(),
-                number: ctx.number(),
-                state: ctx.state(),
-                last_refreshed: ctx.last_refreshed(),
+    pub(crate) fn load_github_context(&self, task_id: TaskId) -> Result<Option<GithubPrContextData>> {
+        let results: Vec<GithubContextSelect> = self.database.transaction(|txn| {
+            txn.query(|q| {
+                let task = q.join(schema::Task);
+                let ctx = q.join(schema::GithubPrContext);
+                q.filter(ctx.task.eq(&task));
+                q.filter(task.external_id.eq(task_id));
+                q.into_vec(GithubContextSelectSelect {
+                    url: &ctx.url,
+                    repo: &ctx.repo,
+                    number: &ctx.number,
+                    state: &ctx.state,
+                    last_refreshed: &ctx.last_refreshed,
+                })
             })
         });
 
@@ -93,7 +92,7 @@ impl Db {
     }
 
     /// Refresh GitHub PR contexts for the given tasks if they are stale.
-    pub(crate) fn refresh_github_contexts(&mut self, tasks: &mut [Task]) -> Result<()> {
+    pub(crate) fn refresh_github_contexts(&self, tasks: &mut [Task]) -> Result<()> {
         let github_token = match &self.config.github_token {
             Some(t) => t.clone(),
             None => return Ok(()),
@@ -159,11 +158,12 @@ impl Db {
             let now = Utc::now().to_rfc3339();
 
             // Update the DB row
-            {
-                let mut txn = self.client.transaction_mut(&self.database);
-
+            let task_id = task.id;
+            let state_clone = state.clone();
+            let now_clone = now.clone();
+            self.database.transaction_mut_ok(|txn| {
                 let task_row = txn.query_one(optional(|row| {
-                    let t = row.and(schema::Task::unique(task.id));
+                    let t = row.and(schema::Task.external_id(task_id));
                     row.then(t)
                 }));
 
@@ -171,27 +171,17 @@ impl Db {
                     // Find the context row by joining and filtering on task
                     let ctx_rows: Vec<_> = txn.query(|q| {
                         let c = q.join(schema::GithubPrContext);
-                        q.filter(c.task().eq(task_row));
+                        q.filter(c.task.eq(task_row));
                         q.into_vec(c)
                     });
 
                     if let Some(ctx_row) = ctx_rows.into_iter().next() {
-                        let _ = txn.update(
-                            ctx_row,
-                            schema::GithubPrContext {
-                                task: Update::default(),
-                                url: Update::default(),
-                                repo: Update::default(),
-                                number: Update::default(),
-                                state: Update::set(&*state),
-                                last_refreshed: Update::set(&*now),
-                            },
-                        );
+                        let mut ctx_mut = txn.mutable(&ctx_row);
+                        ctx_mut.state = state_clone.clone();
+                        ctx_mut.last_refreshed = now_clone.clone();
                     }
-
-                    txn.commit();
                 }
-            }
+            });
 
             // Update in-memory task
             if let Some(ref mut c) = task.github_pr_context {

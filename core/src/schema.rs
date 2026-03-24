@@ -2,6 +2,8 @@ use rust_query::migration::schema;
 
 #[schema(TodoSchema)]
 pub mod vN {
+    use rust_query::TableRow;
+
     pub struct Task {
         #[unique]
         pub external_id: i64,
@@ -21,19 +23,17 @@ pub mod vN {
     pub struct Attachment {
         #[unique]
         pub external_id: i64,
-        pub task: Task,
+        pub task: TableRow<Task>,
         pub file_name: String,
         pub content_type: String,
-        /// Binary data stored as base64-encoded string.
-        /// rust-query 0.4.4 has a bug where Vec<u8> (BLOB) columns cause
-        /// a panic during schema validation, so we use String instead.
-        pub data: String,
+        /// Binary data stored as BLOB.
+        pub data: Vec<u8>,
         pub caption: String,
         pub created_at: String,
     }
 
     pub struct GithubPrContext {
-        pub task: Task,
+        pub task: TableRow<Task>,
         pub url: String,
         pub repo: String,
         pub number: i64,
@@ -42,7 +42,7 @@ pub mod vN {
     }
 
     pub struct LinearContext {
-        pub task: Task,
+        pub task: TableRow<Task>,
         pub url: String,
         pub identifier: String,
         pub data: String,

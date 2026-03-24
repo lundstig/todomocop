@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use chrono::Utc;
-use rust_query::{optional, Select, Update};
+use rust_query::{optional, Select};
 
 use crate::schema;
 use crate::types::{LinearContextData, Task, TaskId};
@@ -36,46 +36,45 @@ struct LinearContextSelect {
 }
 
 impl Db {
-    pub fn link_linear(&mut self, task_id: TaskId, url: &str) -> Result<()> {
+    pub fn link_linear(&self, task_id: TaskId, url: &str) -> Result<()> {
         let identifier = parse_linear_url(url)?;
         let now = Utc::now().to_rfc3339();
 
-        let mut txn = self.client.transaction_mut(&self.database);
+        self.database.transaction_mut(|txn| {
+            let task_row = txn
+                .query_one(optional(|row| {
+                    let task = row.and(schema::Task.external_id(task_id));
+                    row.then(task)
+                }))
+                .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))?;
 
-        let task_row = txn
-            .query_one(optional(|row| {
-                let task = row.and(schema::Task::unique(task_id));
-                row.then(task)
-            }))
-            .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))?;
+            txn.insert(schema::LinearContext {
+                task: task_row,
+                url: url.to_owned(),
+                identifier: identifier.clone(),
+                data: "{}".to_owned(),
+                last_refreshed: now.clone(),
+            })
+            .map_err(|_| anyhow::anyhow!("failed to insert Linear context"))?;
 
-        txn.insert(schema::LinearContext {
-            task: task_row,
-            url,
-            identifier: &identifier,
-            data: "{}",
-            last_refreshed: &now,
+            Ok(())
         })
-        .map_err(|_| anyhow::anyhow!("failed to insert Linear context"))?;
-
-        txn.commit();
-        Ok(())
     }
 
     /// Load the LinearContext for a given task (by external_id) if one exists.
-    pub(crate) fn load_linear_context(&mut self, task_id: TaskId) -> Result<Option<LinearContextData>> {
-        let txn = self.client.transaction(&self.database);
-
-        let results: Vec<LinearContextSelect> = txn.query(|q| {
-            let task = q.join(schema::Task);
-            let ctx = q.join(schema::LinearContext);
-            q.filter(ctx.task().eq(&task));
-            q.filter(task.external_id().eq(task_id));
-            q.into_vec(LinearContextSelectSelect {
-                url: ctx.url(),
-                identifier: ctx.identifier(),
-                data: ctx.data(),
-                last_refreshed: ctx.last_refreshed(),
+    pub(crate) fn load_linear_context(&self, task_id: TaskId) -> Result<Option<LinearContextData>> {
+        let results: Vec<LinearContextSelect> = self.database.transaction(|txn| {
+            txn.query(|q| {
+                let task = q.join(schema::Task);
+                let ctx = q.join(schema::LinearContext);
+                q.filter(ctx.task.eq(&task));
+                q.filter(task.external_id.eq(task_id));
+                q.into_vec(LinearContextSelectSelect {
+                    url: &ctx.url,
+                    identifier: &ctx.identifier,
+                    data: &ctx.data,
+                    last_refreshed: &ctx.last_refreshed,
+                })
             })
         });
 
@@ -92,7 +91,7 @@ impl Db {
     }
 
     /// Refresh Linear contexts for the given tasks if they are stale.
-    pub(crate) fn refresh_linear_contexts(&mut self, tasks: &mut [Task]) -> Result<()> {
+    pub(crate) fn refresh_linear_contexts(&self, tasks: &mut [Task]) -> Result<()> {
         let linear_api_key = match &self.config.linear_api_key {
             Some(k) => k.clone(),
             None => return Ok(()),
@@ -152,37 +151,29 @@ impl Db {
             let data_str = serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string());
 
             // Update the DB row
-            {
-                let mut txn = self.client.transaction_mut(&self.database);
-
+            let task_id = task.id;
+            let data_str_clone = data_str.clone();
+            let now_clone = now.clone();
+            self.database.transaction_mut_ok(|txn| {
                 let task_row = txn.query_one(optional(|row| {
-                    let t = row.and(schema::Task::unique(task.id));
+                    let t = row.and(schema::Task.external_id(task_id));
                     row.then(t)
                 }));
 
                 if let Some(task_row) = task_row {
                     let ctx_rows: Vec<_> = txn.query(|q| {
                         let c = q.join(schema::LinearContext);
-                        q.filter(c.task().eq(task_row));
+                        q.filter(c.task.eq(task_row));
                         q.into_vec(c)
                     });
 
                     if let Some(ctx_row) = ctx_rows.into_iter().next() {
-                        let _ = txn.update(
-                            ctx_row,
-                            schema::LinearContext {
-                                task: Update::default(),
-                                url: Update::default(),
-                                identifier: Update::default(),
-                                data: Update::set(&*data_str),
-                                last_refreshed: Update::set(&*now),
-                            },
-                        );
+                        let mut ctx_mut = txn.mutable(&ctx_row);
+                        ctx_mut.data = data_str_clone.clone();
+                        ctx_mut.last_refreshed = now_clone.clone();
                     }
-
-                    txn.commit();
                 }
-            }
+            });
 
             // Update in-memory task
             if let Some(ref mut c) = task.linear_context {

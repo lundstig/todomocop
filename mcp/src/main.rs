@@ -47,7 +47,7 @@ impl HttpClient for UreqHttpClient {
 // DbHandle: send commands to a dedicated thread owning the Db
 // ---------------------------------------------------------------------------
 
-type DbFn = Box<dyn FnOnce(&mut Db) -> anyhow::Result<String> + Send>;
+type DbFn = Box<dyn FnOnce(&Db) -> anyhow::Result<String> + Send>;
 
 /// A Send+Sync handle that dispatches closures to a dedicated thread owning the Db.
 #[derive(Clone)]
@@ -60,7 +60,7 @@ impl DbHandle {
         let (tx, rx) = std::sync::mpsc::channel::<(DbFn, std::sync::mpsc::Sender<anyhow::Result<String>>)>();
 
         std::thread::spawn(move || {
-            let mut db = match Db::open(&db_path, http, config) {
+            let db = match Db::open(&db_path, http, config) {
                 Ok(db) => db,
                 Err(e) => {
                     eprintln!("Failed to open database: {e:#}");
@@ -69,7 +69,7 @@ impl DbHandle {
             };
 
             while let Ok((f, reply_tx)) = rx.recv() {
-                let result = f(&mut db);
+                let result = f(&db);
                 let _ = reply_tx.send(result);
             }
         });
@@ -82,7 +82,7 @@ impl DbHandle {
 
     fn run<F>(&self, f: F) -> anyhow::Result<String>
     where
-        F: FnOnce(&mut Db) -> anyhow::Result<String> + Send + 'static,
+        F: FnOnce(&Db) -> anyhow::Result<String> + Send + 'static,
     {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         self.tx
