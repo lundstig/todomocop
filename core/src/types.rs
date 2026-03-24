@@ -97,7 +97,7 @@ pub struct GithubPrContextData {
 pub struct LinearContextData {
     pub url: String,
     pub identifier: String,
-    pub data: String,
+    pub data: serde_json::Value,
     pub last_refreshed: String,
 }
 
@@ -105,7 +105,7 @@ pub struct LinearContextData {
 pub struct TaskFilter {
     pub status: Option<TaskStatus>,
     pub workspace: Option<String>,
-    pub has_planned_date: bool,
+    pub has_planned_date: Option<bool>,
     pub priority_max: Option<i64>,
     pub include_snoozed: bool,
 }
