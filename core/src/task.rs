@@ -222,29 +222,35 @@ impl Db {
     }
 
     pub fn get_task(&mut self, id: TaskId) -> Result<Option<Task>> {
-        let txn = self.client.transaction(&self.database);
-
-        let result: Option<TaskSelect> = txn.query_one(optional(|row| {
-            let t = row.and(schema::Task::unique(id));
-            row.then(TaskSelectSelect {
-                external_id: t.external_id(),
-                title: t.title(),
-                description: t.description(),
-                status: t.status(),
-                priority: t.priority(),
-                workspace: t.workspace(),
-                deadline: t.deadline(),
-                snooze_until: t.snooze_until(),
-                planned_date: t.planned_date(),
-                deleted_at: t.deleted_at(),
-                created_at: t.created_at(),
-                updated_at: t.updated_at(),
-            })
-        }));
+        let result: Option<TaskSelect> = {
+            let txn = self.client.transaction(&self.database);
+            txn.query_one(optional(|row| {
+                let t = row.and(schema::Task::unique(id));
+                row.then(TaskSelectSelect {
+                    external_id: t.external_id(),
+                    title: t.title(),
+                    description: t.description(),
+                    status: t.status(),
+                    priority: t.priority(),
+                    workspace: t.workspace(),
+                    deadline: t.deadline(),
+                    snooze_until: t.snooze_until(),
+                    planned_date: t.planned_date(),
+                    deleted_at: t.deleted_at(),
+                    created_at: t.created_at(),
+                    updated_at: t.updated_at(),
+                })
+            }))
+        };
 
         match result {
             None => Ok(None),
-            Some(ts) => Ok(Some(ts.into_task()?)),
+            Some(ts) => {
+                let mut task = ts.into_task()?;
+                task.github_pr_context = self.load_github_context(task.id)?;
+                task.linear_context = self.load_linear_context(task.id)?;
+                Ok(Some(task))
+            }
         }
     }
 }
@@ -560,6 +566,125 @@ mod tests {
                 },
             );
             assert!(err.is_err());
+        }
+
+        // =====================================================================
+        // External context tests (GitHub PR + Linear)
+        // =====================================================================
+
+        // --- test_link_github_pr ---
+        {
+            let pr_task_id = db.add_task(make_add_task("PR task", "work")).unwrap();
+            db.link_github_pr(pr_task_id, "https://github.com/rust-lang/rust/pull/42").unwrap();
+
+            let task = db.get_task(pr_task_id).unwrap().expect("task should exist");
+            let ctx = task.github_pr_context.expect("should have github context");
+            assert_eq!(ctx.repo, "rust-lang/rust");
+            assert_eq!(ctx.number, 42);
+            assert_eq!(ctx.url, "https://github.com/rust-lang/rust/pull/42");
+            assert_eq!(ctx.state, "unknown");
+        }
+
+        // --- test_link_github_pr invalid URL ---
+        {
+            let task_id = db.add_task(make_add_task("Bad PR", "work")).unwrap();
+            assert!(db.link_github_pr(task_id, "https://example.com/not-a-pr").is_err());
+        }
+
+        // --- test_link_github_pr non-existent task ---
+        {
+            assert!(db.link_github_pr(9999, "https://github.com/owner/repo/pull/1").is_err());
+        }
+
+        // --- test_link_linear ---
+        {
+            let linear_task_id = db.add_task(make_add_task("Linear task", "work")).unwrap();
+            db.link_linear(linear_task_id, "https://linear.app/myteam/issue/ENG-123/some-title").unwrap();
+
+            let task = db.get_task(linear_task_id).unwrap().expect("task should exist");
+            let ctx = task.linear_context.expect("should have linear context");
+            assert_eq!(ctx.identifier, "ENG-123");
+            assert_eq!(ctx.url, "https://linear.app/myteam/issue/ENG-123/some-title");
+            assert_eq!(ctx.data, serde_json::json!({}));
+        }
+
+        // --- test_link_linear invalid URL ---
+        {
+            let task_id = db.add_task(make_add_task("Bad Linear", "work")).unwrap();
+            assert!(db.link_linear(task_id, "https://example.com/not-linear").is_err());
+        }
+
+        // --- test_link_linear non-existent task ---
+        {
+            assert!(db.link_linear(9999, "https://linear.app/team/issue/ENG-1/title").is_err());
+        }
+
+        // --- test: contexts appear in list_tasks ---
+        {
+            let tasks = db.list_tasks(TaskFilter {
+                workspace: Some("work".into()),
+                ..Default::default()
+            }).unwrap();
+
+            // Find the PR task and Linear task in results
+            let pr_task = tasks.iter().find(|t| t.title == "PR task");
+            assert!(pr_task.is_some(), "PR task should appear in list");
+            assert!(pr_task.unwrap().github_pr_context.is_some(), "PR task should have github context in list");
+
+            let linear_task = tasks.iter().find(|t| t.title == "Linear task");
+            assert!(linear_task.is_some(), "Linear task should appear in list");
+            assert!(linear_task.unwrap().linear_context.is_some(), "Linear task should have linear context in list");
+        }
+
+        // --- test_github_refresh_on_stale ---
+        // Swap in a mock HTTP client and config to test refresh behavior.
+        {
+            use std::sync::Arc;
+            use std::time::Duration;
+            use crate::http::{HttpClient, IntegrationConfig};
+
+            struct MockHttpClient;
+
+            impl HttpClient for MockHttpClient {
+                fn get(&self, _url: &str, _headers: &[(&str, &str)]) -> anyhow::Result<Vec<u8>> {
+                    let response = serde_json::json!({
+                        "state": "closed",
+                        "merged": true,
+                        "title": "My PR"
+                    });
+                    Ok(serde_json::to_vec(&response).unwrap())
+                }
+
+                fn post(&self, _url: &str, _headers: &[(&str, &str)], _body: &[u8]) -> anyhow::Result<Vec<u8>> {
+                    Err(anyhow::anyhow!("not used"))
+                }
+            }
+
+            // Create a fresh task for the refresh test
+            let refresh_task_id = db.add_task(make_add_task("Refresh test", "work")).unwrap();
+            db.link_github_pr(refresh_task_id, "https://github.com/owner/repo/pull/99").unwrap();
+
+            // Verify initial state is "unknown"
+            let task = db.get_task(refresh_task_id).unwrap().unwrap();
+            assert_eq!(task.github_pr_context.as_ref().unwrap().state, "unknown");
+
+            // Swap in mock HTTP client and zero staleness threshold
+            db.http = Arc::new(MockHttpClient);
+            db.config = IntegrationConfig {
+                github_token: Some("fake-token".into()),
+                linear_api_key: None,
+                staleness_threshold: Duration::from_secs(0), // always stale
+            };
+
+            // list_tasks should trigger refresh since staleness_threshold=0
+            let tasks = db.list_tasks(TaskFilter::default()).unwrap();
+            let refreshed = tasks.iter().find(|t| t.id == refresh_task_id).unwrap();
+            let ctx = refreshed.github_pr_context.as_ref().unwrap();
+            assert_eq!(ctx.state, "merged", "state should be refreshed to 'merged' from mock API response");
+
+            // Verify it's persisted in the DB too
+            let task_after = db.get_task(refresh_task_id).unwrap().unwrap();
+            assert_eq!(task_after.github_pr_context.as_ref().unwrap().state, "merged");
         }
     }
 }

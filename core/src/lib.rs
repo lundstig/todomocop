@@ -1,5 +1,7 @@
 pub mod attachment;
+pub mod github;
 pub mod http;
+pub mod linear;
 pub mod query;
 pub mod schema;
 pub mod task;

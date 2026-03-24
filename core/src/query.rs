@@ -46,25 +46,26 @@ impl QTask {
 
 impl Db {
     pub fn list_tasks(&mut self, filter: TaskFilter) -> Result<Vec<Task>> {
-        let txn = self.client.transaction(&self.database);
-
-        let rows: Vec<QTask> = txn.query(|q| {
-            let t = q.join(schema::Task);
-            q.into_vec(QTaskSelect {
-                external_id: t.external_id(),
-                title: t.title(),
-                description: t.description(),
-                status: t.status(),
-                priority: t.priority(),
-                workspace: t.workspace(),
-                deadline: t.deadline(),
-                snooze_until: t.snooze_until(),
-                planned_date: t.planned_date(),
-                deleted_at: t.deleted_at(),
-                created_at: t.created_at(),
-                updated_at: t.updated_at(),
+        let rows: Vec<QTask> = {
+            let txn = self.client.transaction(&self.database);
+            txn.query(|q| {
+                let t = q.join(schema::Task);
+                q.into_vec(QTaskSelect {
+                    external_id: t.external_id(),
+                    title: t.title(),
+                    description: t.description(),
+                    status: t.status(),
+                    priority: t.priority(),
+                    workspace: t.workspace(),
+                    deadline: t.deadline(),
+                    snooze_until: t.snooze_until(),
+                    planned_date: t.planned_date(),
+                    deleted_at: t.deleted_at(),
+                    created_at: t.created_at(),
+                    updated_at: t.updated_at(),
+                })
             })
-        });
+        };
 
         let today = Utc::now().date_naive();
 
@@ -123,6 +124,16 @@ impl Db {
                 (None, None) => std::cmp::Ordering::Equal,
             }
         });
+
+        // Populate external contexts
+        for task in &mut tasks {
+            task.github_pr_context = self.load_github_context(task.id)?;
+            task.linear_context = self.load_linear_context(task.id)?;
+        }
+
+        // Refresh stale contexts
+        self.refresh_github_contexts(&mut tasks)?;
+        self.refresh_linear_contexts(&mut tasks)?;
 
         Ok(tasks)
     }

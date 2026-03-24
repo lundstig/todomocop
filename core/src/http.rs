@@ -4,12 +4,17 @@ use anyhow::Result;
 
 pub trait HttpClient: Send + Sync {
     fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>>;
+    fn post(&self, url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Vec<u8>>;
 }
 
 pub struct NoopHttpClient;
 
 impl HttpClient for NoopHttpClient {
     fn get(&self, _url: &str, _headers: &[(&str, &str)]) -> Result<Vec<u8>> {
+        Err(anyhow::anyhow!("no HTTP client configured"))
+    }
+
+    fn post(&self, _url: &str, _headers: &[(&str, &str)], _body: &[u8]) -> Result<Vec<u8>> {
         Err(anyhow::anyhow!("no HTTP client configured"))
     }
 }
