@@ -6,6 +6,17 @@ use crate::schema;
 use crate::types::{LinearContextData, Task, TaskId};
 use crate::Db;
 
+/// Parse a Linear identifier (e.g. "ENG-123") into (team_key, number).
+fn parse_identifier(identifier: &str) -> Result<(&str, u64)> {
+    let (team_key, number_str) = identifier
+        .rsplit_once('-')
+        .ok_or_else(|| anyhow::anyhow!("invalid Linear identifier: expected format TEAM-NUMBER, got '{identifier}'"))?;
+    let number = number_str
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid Linear identifier: number part is not a valid integer in '{identifier}'"))?;
+    Ok((team_key, number))
+}
+
 /// Parse a Linear issue URL to extract the identifier (e.g. "ENG-123").
 /// Expected format: `https://linear.app/{team}/issue/{IDENTIFIER}/...`
 fn parse_linear_url(url: &str) -> Result<String> {
@@ -119,11 +130,17 @@ impl Db {
                 continue;
             }
 
-            // Fetch from Linear GraphQL API
+            // Parse identifier into team key and number for the filter query
+            let (team_key, issue_number) = match parse_identifier(&ctx.identifier) {
+                Ok(parts) => parts,
+                Err(_) => continue,
+            };
+
+            // Fetch from Linear GraphQL API using filter to support human-readable identifiers
             let query_body = serde_json::json!({
                 "query": format!(
-                    r#"{{ issue(id: "{}") {{ id title state {{ name }} priority priorityLabel assignee {{ name }} }} }}"#,
-                    ctx.identifier
+                    r#"{{ issues(filter: {{ number: {{ eq: {} }}, team: {{ key: {{ eq: "{}" }} }} }}) {{ nodes {{ id identifier title state {{ name }} priority priorityLabel assignee {{ name }} url }} }} }}"#,
+                    issue_number, team_key
                 )
             });
             let body_bytes = serde_json::to_vec(&query_body).unwrap_or_default();
@@ -142,9 +159,22 @@ impl Db {
                 Err(_) => continue, // On failure, return stale data
             };
 
-            let json: serde_json::Value = match serde_json::from_slice(&resp_body) {
+            let resp_json: serde_json::Value = match serde_json::from_slice(&resp_body) {
                 Ok(v) => v,
                 Err(_) => continue,
+            };
+
+            // Extract the first node from the issues list
+            let json = match resp_json
+                .get("data")
+                .and_then(|d| d.get("issues"))
+                .and_then(|i| i.get("nodes"))
+                .and_then(|n| n.as_array())
+                .and_then(|arr| arr.first())
+                .cloned()
+            {
+                Some(node) => node,
+                None => continue,
             };
 
             let now = Utc::now().to_rfc3339();
@@ -206,5 +236,27 @@ mod tests {
     fn test_parse_linear_url_invalid() {
         assert!(parse_linear_url("https://example.com/foo").is_err());
         assert!(parse_linear_url("https://linear.app/team/project/ENG-1").is_err());
+    }
+
+    #[test]
+    fn test_parse_identifier_valid() {
+        let (team, number) = parse_identifier("ENG-123").unwrap();
+        assert_eq!(team, "ENG");
+        assert_eq!(number, 123);
+    }
+
+    #[test]
+    fn test_parse_identifier_multi_part_team() {
+        // rsplit_once splits on the last '-', so "MY-TEAM-456" -> team="MY-TEAM", number=456
+        let (team, number) = parse_identifier("MY-TEAM-456").unwrap();
+        assert_eq!(team, "MY-TEAM");
+        assert_eq!(number, 456);
+    }
+
+    #[test]
+    fn test_parse_identifier_invalid() {
+        assert!(parse_identifier("NONUMBER").is_err());
+        assert!(parse_identifier("ENG-abc").is_err());
+        assert!(parse_identifier("").is_err());
     }
 }
