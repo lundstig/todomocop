@@ -7,6 +7,7 @@ pub type TaskId = i64;
 pub type AttachmentId = i64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     Idea,
     Ready,
