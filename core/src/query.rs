@@ -1,33 +1,13 @@
 use anyhow::Result;
 use chrono::Utc;
 
-use crate::schema;
-use crate::task::{TaskSelect, TaskSelectSelect};
+use crate::task::TaskSelect;
 use crate::types::{Task, TaskFilter};
 use crate::Db;
 
 impl Db {
     pub fn list_tasks(&self, filter: TaskFilter) -> Result<Vec<Task>> {
-        let rows: Vec<TaskSelect> = self.database.transaction(|txn| {
-            txn.query(|q| {
-                let t = q.join(schema::Task);
-                q.into_vec(TaskSelectSelect {
-                    external_id: &t.external_id,
-                    title: &t.title,
-                    description: &t.description,
-                    status: &t.status,
-                    priority: &t.priority,
-                    workspace: &t.workspace,
-                    deadline: &t.deadline,
-                    snooze_until: &t.snooze_until,
-                    planned_date: &t.planned_date,
-                    deleted_at: &t.deleted_at,
-                    created_at: &t.created_at,
-                    updated_at: &t.updated_at,
-                })
-            })
-        });
-
+        let rows = TaskSelect::query_all(self);
         let today = Utc::now().date_naive();
 
         let mut tasks: Vec<Task> = rows
