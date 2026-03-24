@@ -521,5 +521,45 @@ mod tests {
             assert!(ids.contains(&2));
             assert!(!ids.contains(&3));
         }
+
+        // --- test: add_attachment ---
+        {
+            use crate::types::NewAttachment;
+
+            let att_id = db.add_attachment(
+                id, // task 1: "Buy groceries"
+                NewAttachment {
+                    file_name: "receipt.png".into(),
+                    content_type: "image/png".into(),
+                    data: vec![0x89, 0x50, 0x4e, 0x47],
+                    caption: Some("Store receipt".into()),
+                },
+            ).unwrap();
+            assert_eq!(att_id, 1);
+
+            // Second attachment gets id 2
+            let att_id2 = db.add_attachment(
+                id,
+                NewAttachment {
+                    file_name: "note.txt".into(),
+                    content_type: "text/plain".into(),
+                    data: b"hello".to_vec(),
+                    caption: None,
+                },
+            ).unwrap();
+            assert_eq!(att_id2, 2);
+
+            // Adding attachment to a non-existent task should error
+            let err = db.add_attachment(
+                9999,
+                NewAttachment {
+                    file_name: "x.txt".into(),
+                    content_type: "text/plain".into(),
+                    data: vec![],
+                    caption: None,
+                },
+            );
+            assert!(err.is_err());
+        }
     }
 }

@@ -1,3 +1,4 @@
+pub mod attachment;
 pub mod http;
 pub mod query;
 pub mod schema;
