@@ -7,24 +7,25 @@ use crate::types::{AddTask, EditTask, Task, TaskId, TaskStatus};
 use crate::Db;
 
 /// Internal struct for selecting all task columns from the database.
+/// Used by both `get_task` (task.rs) and `list_tasks`/`search` (query.rs).
 #[derive(Select)]
-struct TaskSelect {
-    external_id: i64,
-    title: String,
-    description: String,
-    status: String,
-    priority: Option<i64>,
-    workspace: String,
-    deadline: Option<String>,
-    snooze_until: Option<String>,
-    planned_date: Option<String>,
-    deleted_at: Option<String>,
-    created_at: String,
-    updated_at: String,
+pub(crate) struct TaskSelect {
+    pub(crate) external_id: i64,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) status: String,
+    pub(crate) priority: Option<i64>,
+    pub(crate) workspace: String,
+    pub(crate) deadline: Option<String>,
+    pub(crate) snooze_until: Option<String>,
+    pub(crate) planned_date: Option<String>,
+    pub(crate) deleted_at: Option<String>,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
 }
 
 impl TaskSelect {
-    fn into_task(self) -> Result<Task> {
+    pub(crate) fn into_task(self) -> Result<Task> {
         let status: TaskStatus = self.status.parse()?;
         Ok(Task {
             id: self.external_id,
@@ -45,8 +46,21 @@ impl TaskSelect {
     }
 }
 
+fn validate_date(field_name: &str, value: &str) -> Result<()> {
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| anyhow::anyhow!("{field_name} must be a valid date (YYYY-MM-DD), got: {value}"))?;
+    Ok(())
+}
+
 impl Db {
     pub fn add_task(&self, params: AddTask) -> Result<TaskId> {
+        if let Some(d) = &params.deadline {
+            validate_date("deadline", d)?;
+        }
+        if let Some(d) = &params.planned_date {
+            validate_date("planned_date", d)?;
+        }
+
         let now = Utc::now().to_rfc3339();
         let status = params.status.unwrap_or(TaskStatus::Idea).to_string();
         let description = params.description.unwrap_or_default();
@@ -81,6 +95,13 @@ impl Db {
     }
 
     pub fn edit_task(&self, id: TaskId, params: EditTask) -> Result<()> {
+        if let Some(Some(d)) = &params.deadline {
+            validate_date("deadline", d)?;
+        }
+        if let Some(Some(d)) = &params.planned_date {
+            validate_date("planned_date", d)?;
+        }
+
         let now = Utc::now().to_rfc3339();
 
         self.database.transaction_mut(|txn| {
@@ -210,6 +231,80 @@ mod tests {
             deadline: None,
             planned_date: None,
         }
+    }
+
+    #[test]
+    fn test_invalid_dates_rejected() {
+        let db = Db::open_in_memory().unwrap();
+
+        let invalid_dates = ["next tuesday", "not-a-date", "2026/03/24", "24-03-2026", ""];
+
+        for bad in &invalid_dates {
+            let err = db.add_task(AddTask {
+                title: "Test".into(),
+                description: None,
+                status: None,
+                priority: None,
+                workspace: "work".into(),
+                deadline: Some(bad.to_string()),
+                planned_date: None,
+            });
+            assert!(err.is_err(), "deadline '{bad}' should be rejected");
+
+            let err = db.add_task(AddTask {
+                title: "Test".into(),
+                description: None,
+                status: None,
+                priority: None,
+                workspace: "work".into(),
+                deadline: None,
+                planned_date: Some(bad.to_string()),
+            });
+            assert!(err.is_err(), "planned_date '{bad}' should be rejected");
+        }
+
+        // Valid date should succeed
+        let id = db.add_task(AddTask {
+            title: "Valid date task".into(),
+            description: None,
+            status: None,
+            priority: None,
+            workspace: "work".into(),
+            deadline: Some("2026-03-24".into()),
+            planned_date: Some("2026-04-01".into()),
+        });
+        assert!(id.is_ok(), "valid dates should be accepted");
+
+        // edit_task: invalid dates rejected
+        let task_id = db.add_task(make_add_task("Edit me", "work")).unwrap();
+        let err = db.edit_task(
+            task_id,
+            EditTask {
+                deadline: Some(Some("next tuesday".into())),
+                ..Default::default()
+            },
+        );
+        assert!(err.is_err(), "edit_task with invalid deadline should be rejected");
+
+        let err = db.edit_task(
+            task_id,
+            EditTask {
+                planned_date: Some(Some("not-a-date".into())),
+                ..Default::default()
+            },
+        );
+        assert!(err.is_err(), "edit_task with invalid planned_date should be rejected");
+
+        // Clearing (Some(None)) should still work
+        db.edit_task(
+            task_id,
+            EditTask {
+                deadline: Some(None),
+                planned_date: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
 
     #[test]

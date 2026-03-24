@@ -1,55 +1,17 @@
 use anyhow::Result;
 use chrono::Utc;
-use rust_query::Select;
 
 use crate::schema;
-use crate::types::{Task, TaskFilter, TaskStatus};
+use crate::task::{TaskSelect, TaskSelectSelect};
+use crate::types::{Task, TaskFilter};
 use crate::Db;
-
-#[derive(Select)]
-struct QTask {
-    external_id: i64,
-    title: String,
-    description: String,
-    status: String,
-    priority: Option<i64>,
-    workspace: String,
-    deadline: Option<String>,
-    snooze_until: Option<String>,
-    planned_date: Option<String>,
-    deleted_at: Option<String>,
-    created_at: String,
-    updated_at: String,
-}
-
-impl QTask {
-    fn into_task(self) -> Result<Task> {
-        let status: TaskStatus = self.status.parse()?;
-        Ok(Task {
-            id: self.external_id,
-            title: self.title,
-            description: self.description,
-            status,
-            priority: self.priority,
-            workspace: self.workspace,
-            deadline: self.deadline,
-            snooze_until: self.snooze_until,
-            planned_date: self.planned_date,
-            deleted_at: self.deleted_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-            github_pr_context: None,
-            linear_context: None,
-        })
-    }
-}
 
 impl Db {
     pub fn list_tasks(&self, filter: TaskFilter) -> Result<Vec<Task>> {
-        let rows: Vec<QTask> = self.database.transaction(|txn| {
+        let rows: Vec<TaskSelect> = self.database.transaction(|txn| {
             txn.query(|q| {
                 let t = q.join(schema::Task);
-                q.into_vec(QTaskSelect {
+                q.into_vec(TaskSelectSelect {
                     external_id: &t.external_id,
                     title: &t.title,
                     description: &t.description,
