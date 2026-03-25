@@ -743,5 +743,30 @@ mod tests {
             let task_after = db.get_task(refresh_task_id).unwrap().unwrap();
             assert_eq!(task_after.github_pr_context.as_ref().unwrap().state, "merged");
         }
+
+        // --- test: canceled status roundtrips ---
+        {
+            let canceled_id = db.add_task(make_add_task("Cancel me", "work")).unwrap();
+
+            db.edit_task(
+                canceled_id,
+                EditTask {
+                    status: Some(TaskStatus::Canceled),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            let task = db.get_task(canceled_id).unwrap().expect("task should exist");
+            assert_eq!(task.status, TaskStatus::Canceled);
+
+            // Canceled task should appear when filtering by canceled status
+            let canceled_tasks = db.list_tasks(TaskFilter {
+                status: Some(TaskStatus::Canceled),
+                ..Default::default()
+            }).unwrap();
+            assert!(canceled_tasks.iter().any(|t| t.id == canceled_id));
+            assert!(canceled_tasks.iter().all(|t| t.status == TaskStatus::Canceled));
+        }
     }
 }

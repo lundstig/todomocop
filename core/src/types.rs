@@ -13,6 +13,7 @@ pub enum TaskStatus {
     Ready,
     InProgress,
     Done,
+    Canceled,
 }
 
 impl fmt::Display for TaskStatus {
@@ -22,6 +23,7 @@ impl fmt::Display for TaskStatus {
             TaskStatus::Ready => write!(f, "ready"),
             TaskStatus::InProgress => write!(f, "in_progress"),
             TaskStatus::Done => write!(f, "done"),
+            TaskStatus::Canceled => write!(f, "canceled"),
         }
     }
 }
@@ -35,6 +37,7 @@ impl FromStr for TaskStatus {
             "ready" => Ok(TaskStatus::Ready),
             "in_progress" => Ok(TaskStatus::InProgress),
             "done" => Ok(TaskStatus::Done),
+            "canceled" => Ok(TaskStatus::Canceled),
             other => Err(anyhow::anyhow!("unknown task status: {other}")),
         }
     }

@@ -112,7 +112,7 @@ struct AddTaskParams {
     deadline: Option<String>,
     #[schemars(description = "Planned date string (ISO 8601)")]
     planned_date: Option<String>,
-    #[schemars(description = "Status: idea, ready, in_progress, or done")]
+    #[schemars(description = "Status: idea, ready, in_progress, done, or canceled")]
     status: Option<String>,
 }
 
@@ -124,7 +124,7 @@ struct EditTaskParams {
     title: Option<String>,
     #[schemars(description = "New description")]
     description: Option<String>,
-    #[schemars(description = "New status: idea, ready, in_progress, or done")]
+    #[schemars(description = "New status: idea, ready, in_progress, done, or canceled")]
     status: Option<String>,
     #[schemars(description = "New priority (null to clear)")]
     priority: Option<Option<i64>>,
@@ -144,7 +144,7 @@ struct DeleteTaskParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ListTasksParams {
-    #[schemars(description = "Filter by status: idea, ready, in_progress, or done")]
+    #[schemars(description = "Filter by status: idea, ready, in_progress, done, or canceled")]
     status: Option<String>,
     #[schemars(description = "Filter by workspace")]
     workspace: Option<String>,
@@ -160,7 +160,7 @@ struct ListTasksParams {
 struct SearchParams {
     #[schemars(description = "Search query (matches title and description)")]
     query: String,
-    #[schemars(description = "Filter by status: idea, ready, in_progress, or done")]
+    #[schemars(description = "Filter by status: idea, ready, in_progress, done, or canceled")]
     status: Option<String>,
     #[schemars(description = "Filter by workspace")]
     workspace: Option<String>,
