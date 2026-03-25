@@ -1,6 +1,7 @@
 use rust_query::migration::schema;
 
 #[schema(TodoSchema)]
+#[version(0..=1)]
 pub mod vN {
     use rust_query::TableRow;
 
@@ -34,21 +35,33 @@ pub mod vN {
 
     pub struct GithubPrContext {
         pub task: TableRow<Task>,
+        #[unique]
         pub url: String,
         pub repo: String,
         pub number: i64,
         pub state: String,
         pub last_refreshed: String,
+        #[version(1..)]
+        pub title: String,
+        #[version(1..)]
+        pub author: String,
+        #[version(1..)]
+        pub reviewers: String,
+        #[version(1..)]
+        pub review_state: String,
     }
 
     pub struct LinearContext {
         pub task: TableRow<Task>,
         pub url: String,
+        #[unique]
         pub identifier: String,
         pub data: String,
         pub last_refreshed: String,
+        #[version(1..)]
+        pub state_type: String,
     }
 }
 
-// Re-export the generated schema types from v0 so they're accessible from outside this module.
-pub use v0::*;
+// Re-export the generated schema types from v1 so they're accessible from outside this module.
+pub use v1::*;

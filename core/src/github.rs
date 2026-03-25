@@ -57,6 +57,10 @@ impl Db {
                 number,
                 state: "unknown".to_owned(),
                 last_refreshed: now.clone(),
+                title: String::new(),
+                author: String::new(),
+                reviewers: "[]".to_owned(),
+                review_state: "{}".to_owned(),
             })
             .map_err(|_| anyhow::anyhow!("failed to insert GitHub PR context"))?;
 

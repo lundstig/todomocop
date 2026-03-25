@@ -65,6 +65,7 @@ impl Db {
                 identifier: identifier.clone(),
                 data: "{}".to_owned(),
                 last_refreshed: now.clone(),
+                state_type: String::new(),
             })
             .map_err(|_| anyhow::anyhow!("failed to insert Linear context"))?;
 

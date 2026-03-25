@@ -27,6 +27,17 @@ impl Db {
     pub fn open(path: &Path, http: Arc<dyn HttpClient>, config: IntegrationConfig) -> Result<Self> {
         let database = Database::migrator(Config::open(path))
             .ok_or_else(|| anyhow::anyhow!("database version is older than supported"))?
+            .migrate(|txn| schema::v0::migrate::TodoSchema {
+                github_pr_context: txn.migrate_ok(|_old| schema::v0::migrate::GithubPrContext {
+                    title: String::new(),
+                    author: String::new(),
+                    reviewers: "[]".to_owned(),
+                    review_state: "{}".to_owned(),
+                }),
+                linear_context: txn.migrate_ok(|_old| schema::v0::migrate::LinearContext {
+                    state_type: String::new(),
+                }),
+            })
             .finish()
             .ok_or_else(|| anyhow::anyhow!("database version is newer than supported"))?;
         Ok(Db {
