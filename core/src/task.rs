@@ -64,8 +64,8 @@ impl TaskSelect {
             deleted_at: self.deleted_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
-            github_pr_context: None,
-            linear_context: None,
+            github_pr_contexts: Vec::new(),
+            linear_contexts: Vec::new(),
         })
     }
 }
@@ -232,8 +232,8 @@ impl Db {
             None => Ok(None),
             Some(ts) => {
                 let mut task = ts.into_task()?;
-                task.github_pr_context = self.load_github_context(task.id)?;
-                task.linear_context = self.load_linear_context(task.id)?;
+                task.github_pr_contexts = self.load_github_contexts(task.id)?;
+                task.linear_contexts = self.load_linear_contexts(task.id)?;
                 Ok(Some(task))
             }
         }
@@ -635,7 +635,8 @@ mod tests {
             db.link_github_pr(pr_task_id, "https://github.com/rust-lang/rust/pull/42").unwrap();
 
             let task = db.get_task(pr_task_id).unwrap().expect("task should exist");
-            let ctx = task.github_pr_context.expect("should have github context");
+            assert_eq!(task.github_pr_contexts.len(), 1);
+            let ctx = &task.github_pr_contexts[0];
             assert_eq!(ctx.repo, "rust-lang/rust");
             assert_eq!(ctx.number, 42);
             assert_eq!(ctx.url, "https://github.com/rust-lang/rust/pull/42");
@@ -659,7 +660,8 @@ mod tests {
             db.link_linear(linear_task_id, "https://linear.app/myteam/issue/ENG-123/some-title").unwrap();
 
             let task = db.get_task(linear_task_id).unwrap().expect("task should exist");
-            let ctx = task.linear_context.expect("should have linear context");
+            assert_eq!(task.linear_contexts.len(), 1);
+            let ctx = &task.linear_contexts[0];
             assert_eq!(ctx.identifier, "ENG-123");
             assert_eq!(ctx.url, "https://linear.app/myteam/issue/ENG-123/some-title");
             assert_eq!(ctx.data, serde_json::json!({}));
@@ -686,11 +688,11 @@ mod tests {
             // Find the PR task and Linear task in results
             let pr_task = tasks.iter().find(|t| t.title == "PR task");
             assert!(pr_task.is_some(), "PR task should appear in list");
-            assert!(pr_task.unwrap().github_pr_context.is_some(), "PR task should have github context in list");
+            assert!(!pr_task.unwrap().github_pr_contexts.is_empty(), "PR task should have github context in list");
 
             let linear_task = tasks.iter().find(|t| t.title == "Linear task");
             assert!(linear_task.is_some(), "Linear task should appear in list");
-            assert!(linear_task.unwrap().linear_context.is_some(), "Linear task should have linear context in list");
+            assert!(!linear_task.unwrap().linear_contexts.is_empty(), "Linear task should have linear context in list");
         }
 
         // --- test_github_refresh_on_stale ---
@@ -723,7 +725,7 @@ mod tests {
 
             // Verify initial state is "unknown"
             let task = db.get_task(refresh_task_id).unwrap().unwrap();
-            assert_eq!(task.github_pr_context.as_ref().unwrap().state, "unknown");
+            assert_eq!(task.github_pr_contexts[0].state, "unknown");
 
             // Swap in mock HTTP client and zero staleness threshold
             db.http = Arc::new(MockHttpClient);
@@ -736,12 +738,11 @@ mod tests {
             // list_tasks should trigger refresh since staleness_threshold=0
             let tasks = db.list_tasks(TaskFilter::default()).unwrap();
             let refreshed = tasks.iter().find(|t| t.id == refresh_task_id).unwrap();
-            let ctx = refreshed.github_pr_context.as_ref().unwrap();
-            assert_eq!(ctx.state, "merged", "state should be refreshed to 'merged' from mock API response");
+            assert_eq!(refreshed.github_pr_contexts[0].state, "merged", "state should be refreshed to 'merged' from mock API response");
 
             // Verify it's persisted in the DB too
             let task_after = db.get_task(refresh_task_id).unwrap().unwrap();
-            assert_eq!(task_after.github_pr_context.as_ref().unwrap().state, "merged");
+            assert_eq!(task_after.github_pr_contexts[0].state, "merged");
         }
 
         // --- test: canceled status roundtrips ---

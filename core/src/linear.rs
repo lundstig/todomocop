@@ -42,6 +42,7 @@ fn parse_linear_url(url: &str) -> Result<String> {
 struct LinearContextSelect {
     url: String,
     identifier: String,
+    state_type: String,
     data: String,
     last_refreshed: String,
 }
@@ -73,8 +74,8 @@ impl Db {
         })
     }
 
-    /// Load the LinearContext for a given task (by external_id) if one exists.
-    pub(crate) fn load_linear_context(&self, task_id: TaskId) -> Result<Option<LinearContextData>> {
+    /// Load all LinearContexts for a given task (by external_id).
+    pub(crate) fn load_linear_contexts(&self, task_id: TaskId) -> Result<Vec<LinearContextData>> {
         let results: Vec<LinearContextSelect> = self.database.transaction(|txn| {
             txn.query(|q| {
                 let task = q.join(schema::Task);
@@ -84,22 +85,27 @@ impl Db {
                 q.into_vec(LinearContextSelectSelect {
                     url: &ctx.url,
                     identifier: &ctx.identifier,
+                    state_type: &ctx.state_type,
                     data: &ctx.data,
                     last_refreshed: &ctx.last_refreshed,
                 })
             })
         });
 
-        Ok(results.into_iter().next().map(|c| {
-            let data_value: serde_json::Value =
-                serde_json::from_str(&c.data).unwrap_or(serde_json::Value::Object(Default::default()));
-            LinearContextData {
-                url: c.url,
-                identifier: c.identifier,
-                data: data_value,
-                last_refreshed: c.last_refreshed,
-            }
-        }))
+        Ok(results
+            .into_iter()
+            .map(|c| {
+                let data_value: serde_json::Value = serde_json::from_str(&c.data)
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                LinearContextData {
+                    url: c.url,
+                    identifier: c.identifier,
+                    state_type: c.state_type,
+                    data: data_value,
+                    last_refreshed: c.last_refreshed,
+                }
+            })
+            .collect())
     }
 
     /// Refresh Linear contexts for the given tasks if they are stale.
@@ -112,104 +118,110 @@ impl Db {
         let threshold = self.config.staleness_threshold;
 
         for task in tasks.iter_mut() {
-            let ctx = match &task.linear_context {
-                Some(c) => c,
-                None => continue,
-            };
+            for ctx in &mut task.linear_contexts {
+                // Check staleness
+                let last_refreshed = chrono::DateTime::parse_from_rfc3339(&ctx.last_refreshed)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
 
-            // Check staleness
-            let last_refreshed = chrono::DateTime::parse_from_rfc3339(&ctx.last_refreshed)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
+                let age = Utc::now()
+                    .signed_duration_since(last_refreshed)
+                    .to_std()
+                    .unwrap_or_default();
 
-            let age = Utc::now()
-                .signed_duration_since(last_refreshed)
-                .to_std()
-                .unwrap_or_default();
-
-            if age < threshold {
-                continue;
-            }
-
-            // Parse identifier into team key and number for the filter query
-            let (team_key, issue_number) = match parse_identifier(&ctx.identifier) {
-                Ok(parts) => parts,
-                Err(_) => continue,
-            };
-
-            // Fetch from Linear GraphQL API using filter to support human-readable identifiers
-            let query_body = serde_json::json!({
-                "query": format!(
-                    r#"{{ issues(filter: {{ number: {{ eq: {} }}, team: {{ key: {{ eq: "{}" }} }} }}) {{ nodes {{ id identifier title state {{ name }} priority priorityLabel assignee {{ name }} url }} }} }}"#,
-                    issue_number, team_key
-                )
-            });
-            let body_bytes = serde_json::to_vec(&query_body).unwrap_or_default();
-
-            let response = self.http.post(
-                "https://api.linear.app/graphql",
-                &[
-                    ("Authorization", linear_api_key.as_str()),
-                    ("Content-Type", "application/json"),
-                ],
-                &body_bytes,
-            );
-
-            let resp_body = match response {
-                Ok(b) => b,
-                Err(_) => continue, // On failure, return stale data
-            };
-
-            let resp_json: serde_json::Value = match serde_json::from_slice(&resp_body) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Extract the first node from the issues list
-            let json = match resp_json
-                .get("data")
-                .and_then(|d| d.get("issues"))
-                .and_then(|i| i.get("nodes"))
-                .and_then(|n| n.as_array())
-                .and_then(|arr| arr.first())
-                .cloned()
-            {
-                Some(node) => node,
-                None => continue,
-            };
-
-            let now = Utc::now().to_rfc3339();
-            let data_str = serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string());
-
-            // Update the DB row
-            let task_id = task.id;
-            let data_str_clone = data_str.clone();
-            let now_clone = now.clone();
-            self.database.transaction_mut_ok(|txn| {
-                let task_row = txn.query_one(optional(|row| {
-                    let t = row.and(schema::Task.external_id(task_id));
-                    row.then(t)
-                }));
-
-                if let Some(task_row) = task_row {
-                    let ctx_rows: Vec<_> = txn.query(|q| {
-                        let c = q.join(schema::LinearContext);
-                        q.filter(c.task.eq(task_row));
-                        q.into_vec(c)
-                    });
-
-                    if let Some(ctx_row) = ctx_rows.into_iter().next() {
-                        let mut ctx_mut = txn.mutable(&ctx_row);
-                        ctx_mut.data = data_str_clone.clone();
-                        ctx_mut.last_refreshed = now_clone.clone();
-                    }
+                if age < threshold {
+                    continue;
                 }
-            });
 
-            // Update in-memory task
-            if let Some(ref mut c) = task.linear_context {
-                c.data = json;
-                c.last_refreshed = now;
+                // Parse identifier into team key and number for the filter query
+                let (team_key, issue_number) = match parse_identifier(&ctx.identifier) {
+                    Ok(parts) => parts,
+                    Err(_) => continue,
+                };
+
+                // Fetch from Linear GraphQL API using filter to support human-readable identifiers
+                let query_body = serde_json::json!({
+                    "query": format!(
+                        r#"{{ issues(filter: {{ number: {{ eq: {} }}, team: {{ key: {{ eq: "{}" }} }} }}) {{ nodes {{ id identifier title state {{ name type }} priority priorityLabel assignee {{ name }} url }} }} }}"#,
+                        issue_number, team_key
+                    )
+                });
+                let body_bytes = serde_json::to_vec(&query_body).unwrap_or_default();
+
+                let response = self.http.post(
+                    "https://api.linear.app/graphql",
+                    &[
+                        ("Authorization", linear_api_key.as_str()),
+                        ("Content-Type", "application/json"),
+                    ],
+                    &body_bytes,
+                );
+
+                let resp_body = match response {
+                    Ok(b) => b,
+                    Err(_) => continue, // On failure, return stale data
+                };
+
+                let resp_json: serde_json::Value = match serde_json::from_slice(&resp_body) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                // Extract the first node from the issues list
+                let json = match resp_json
+                    .get("data")
+                    .and_then(|d| d.get("issues"))
+                    .and_then(|i| i.get("nodes"))
+                    .and_then(|n| n.as_array())
+                    .and_then(|arr| arr.first())
+                    .cloned()
+                {
+                    Some(node) => node,
+                    None => continue,
+                };
+
+                let now = Utc::now().to_rfc3339();
+                let data_str = serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string());
+                let state_type = json
+                    .get("state")
+                    .and_then(|s| s.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                // Update the DB row matching this context's URL
+                let task_id = task.id;
+                let ctx_url = ctx.url.clone();
+                let data_str_clone = data_str.clone();
+                let state_type_clone = state_type.clone();
+                let now_clone = now.clone();
+                self.database.transaction_mut_ok(|txn| {
+                    let task_row = txn.query_one(optional(|row| {
+                        let t = row.and(schema::Task.external_id(task_id));
+                        row.then(t)
+                    }));
+
+                    if let Some(task_row) = task_row {
+                        let ctx_rows: Vec<_> = txn.query(|q| {
+                            let c = q.join(schema::LinearContext);
+                            q.filter(c.task.eq(task_row));
+                            q.filter(c.url.eq(&ctx_url));
+                            q.into_vec(c)
+                        });
+
+                        if let Some(ctx_row) = ctx_rows.into_iter().next() {
+                            let mut ctx_mut = txn.mutable(&ctx_row);
+                            ctx_mut.data = data_str_clone.clone();
+                            ctx_mut.state_type = state_type_clone.clone();
+                            ctx_mut.last_refreshed = now_clone.clone();
+                        }
+                    }
+                });
+
+                // Update in-memory context
+                ctx.data = json;
+                ctx.state_type = state_type;
+                ctx.last_refreshed = now;
             }
         }
 

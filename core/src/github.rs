@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{bail, Result};
 use chrono::Utc;
 use rust_query::{optional, Select};
@@ -34,6 +36,10 @@ struct GithubContextSelect {
     repo: String,
     number: i64,
     state: String,
+    title: String,
+    author: String,
+    reviewers: String,
+    review_state: String,
     last_refreshed: String,
 }
 
@@ -68,8 +74,8 @@ impl Db {
         })
     }
 
-    /// Load the GithubPrContext for a given task (by external_id) if one exists.
-    pub(crate) fn load_github_context(&self, task_id: TaskId) -> Result<Option<GithubPrContextData>> {
+    /// Load all GithubPrContexts for a given task (by external_id).
+    pub(crate) fn load_github_contexts(&self, task_id: TaskId) -> Result<Vec<GithubPrContextData>> {
         let results: Vec<GithubContextSelect> = self.database.transaction(|txn| {
             txn.query(|q| {
                 let task = q.join(schema::Task);
@@ -81,18 +87,35 @@ impl Db {
                     repo: &ctx.repo,
                     number: &ctx.number,
                     state: &ctx.state,
+                    title: &ctx.title,
+                    author: &ctx.author,
+                    reviewers: &ctx.reviewers,
+                    review_state: &ctx.review_state,
                     last_refreshed: &ctx.last_refreshed,
                 })
             })
         });
 
-        Ok(results.into_iter().next().map(|c| GithubPrContextData {
-            url: c.url,
-            repo: c.repo,
-            number: c.number,
-            state: c.state,
-            last_refreshed: c.last_refreshed,
-        }))
+        Ok(results
+            .into_iter()
+            .map(|c| {
+                let reviewers: Vec<String> =
+                    serde_json::from_str(&c.reviewers).unwrap_or_default();
+                let review_state: HashMap<String, String> =
+                    serde_json::from_str(&c.review_state).unwrap_or_default();
+                GithubPrContextData {
+                    url: c.url,
+                    repo: c.repo,
+                    number: c.number,
+                    state: c.state,
+                    title: c.title,
+                    author: c.author,
+                    reviewers,
+                    review_state,
+                    last_refreshed: c.last_refreshed,
+                }
+            })
+            .collect())
     }
 
     /// Refresh GitHub PR contexts for the given tasks if they are stale.
@@ -105,92 +128,97 @@ impl Db {
         let threshold = self.config.staleness_threshold;
 
         for task in tasks.iter_mut() {
-            let ctx = match &task.github_pr_context {
-                Some(c) => c,
-                None => continue,
-            };
+            for ctx in &mut task.github_pr_contexts {
+                // Check staleness
+                let last_refreshed = chrono::DateTime::parse_from_rfc3339(&ctx.last_refreshed)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
 
-            // Check staleness
-            let last_refreshed = chrono::DateTime::parse_from_rfc3339(&ctx.last_refreshed)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
+                let age = Utc::now()
+                    .signed_duration_since(last_refreshed)
+                    .to_std()
+                    .unwrap_or_default();
 
-            let age = Utc::now()
-                .signed_duration_since(last_refreshed)
-                .to_std()
-                .unwrap_or_default();
-
-            if age < threshold {
-                continue;
-            }
-
-            // Fetch from GitHub API
-            let api_url = format!(
-                "https://api.github.com/repos/{}/pulls/{}",
-                ctx.repo, ctx.number
-            );
-            let auth_header = format!("Bearer {github_token}");
-            let response = self.http.get(
-                &api_url,
-                &[
-                    ("Authorization", &auth_header),
-                    ("Accept", "application/vnd.github+json"),
-                    ("User-Agent", "todomocop"),
-                ],
-            );
-
-            let body = match response {
-                Ok(b) => b,
-                Err(_) => continue, // On failure, return stale data
-            };
-
-            let json: serde_json::Value = match serde_json::from_slice(&body) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Determine state: "merged" if merged==true, else use state field
-            let state = if json.get("merged").and_then(|v| v.as_bool()).unwrap_or(false) {
-                "merged".to_string()
-            } else {
-                json.get("state")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string()
-            };
-
-            let now = Utc::now().to_rfc3339();
-
-            // Update the DB row
-            let task_id = task.id;
-            let state_clone = state.clone();
-            let now_clone = now.clone();
-            self.database.transaction_mut_ok(|txn| {
-                let task_row = txn.query_one(optional(|row| {
-                    let t = row.and(schema::Task.external_id(task_id));
-                    row.then(t)
-                }));
-
-                if let Some(task_row) = task_row {
-                    // Find the context row by joining and filtering on task
-                    let ctx_rows: Vec<_> = txn.query(|q| {
-                        let c = q.join(schema::GithubPrContext);
-                        q.filter(c.task.eq(task_row));
-                        q.into_vec(c)
-                    });
-
-                    if let Some(ctx_row) = ctx_rows.into_iter().next() {
-                        let mut ctx_mut = txn.mutable(&ctx_row);
-                        ctx_mut.state = state_clone.clone();
-                        ctx_mut.last_refreshed = now_clone.clone();
-                    }
+                if age < threshold {
+                    continue;
                 }
-            });
 
-            // Update in-memory task
-            if let Some(ref mut c) = task.github_pr_context {
-                c.state = state;
-                c.last_refreshed = now;
+                // Fetch from GitHub API
+                let api_url = format!(
+                    "https://api.github.com/repos/{}/pulls/{}",
+                    ctx.repo, ctx.number
+                );
+                let auth_header = format!("Bearer {github_token}");
+                let response = self.http.get(
+                    &api_url,
+                    &[
+                        ("Authorization", &auth_header),
+                        ("Accept", "application/vnd.github+json"),
+                        ("User-Agent", "todomocop"),
+                    ],
+                );
+
+                let body = match response {
+                    Ok(b) => b,
+                    Err(_) => continue, // On failure, return stale data
+                };
+
+                let json: serde_json::Value = match serde_json::from_slice(&body) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                // Determine state: "merged" if merged==true, else use state field
+                let state = if json.get("merged").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    "merged".to_string()
+                } else {
+                    json.get("state")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                };
+
+                let title = json
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let now = Utc::now().to_rfc3339();
+
+                // Update the DB row matching this context's URL
+                let task_id = task.id;
+                let ctx_url = ctx.url.clone();
+                let state_clone = state.clone();
+                let title_clone = title.clone();
+                let now_clone = now.clone();
+                self.database.transaction_mut_ok(|txn| {
+                    let task_row = txn.query_one(optional(|row| {
+                        let t = row.and(schema::Task.external_id(task_id));
+                        row.then(t)
+                    }));
+
+                    if let Some(task_row) = task_row {
+                        let ctx_rows: Vec<_> = txn.query(|q| {
+                            let c = q.join(schema::GithubPrContext);
+                            q.filter(c.task.eq(task_row));
+                            q.filter(c.url.eq(&ctx_url));
+                            q.into_vec(c)
+                        });
+
+                        if let Some(ctx_row) = ctx_rows.into_iter().next() {
+                            let mut ctx_mut = txn.mutable(&ctx_row);
+                            ctx_mut.state = state_clone.clone();
+                            ctx_mut.title = title_clone.clone();
+                            ctx_mut.last_refreshed = now_clone.clone();
+                        }
+                    }
+                });
+
+                // Update in-memory context
+                ctx.state = state;
+                ctx.title = title;
+                ctx.last_refreshed = now;
             }
         }
 

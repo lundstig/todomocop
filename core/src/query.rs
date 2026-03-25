@@ -68,8 +68,8 @@ impl Db {
 
         // Populate external contexts
         for task in &mut tasks {
-            task.github_pr_context = self.load_github_context(task.id)?;
-            task.linear_context = self.load_linear_context(task.id)?;
+            task.github_pr_contexts = self.load_github_contexts(task.id)?;
+            task.linear_contexts = self.load_linear_contexts(task.id)?;
         }
 
         // Refresh stale contexts

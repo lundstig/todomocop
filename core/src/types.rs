@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -84,8 +85,8 @@ pub struct Task {
     pub deleted_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    pub github_pr_context: Option<GithubPrContextData>,
-    pub linear_context: Option<LinearContextData>,
+    pub github_pr_contexts: Vec<GithubPrContextData>,
+    pub linear_contexts: Vec<LinearContextData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +95,10 @@ pub struct GithubPrContextData {
     pub repo: String,
     pub number: i64,
     pub state: String,
+    pub title: String,
+    pub author: String,
+    pub reviewers: Vec<String>,
+    pub review_state: HashMap<String, String>,
     pub last_refreshed: String,
 }
 
@@ -101,6 +106,7 @@ pub struct GithubPrContextData {
 pub struct LinearContextData {
     pub url: String,
     pub identifier: String,
+    pub state_type: String,
     pub data: serde_json::Value,
     pub last_refreshed: String,
 }
