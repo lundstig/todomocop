@@ -1323,6 +1323,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "todomocop-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "todomocop-core",
+]
+
+[[package]]
 name = "tokio"
 version = "1.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
