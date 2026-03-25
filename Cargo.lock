@@ -1290,6 +1290,7 @@ dependencies = [
  "dirs",
  "serde_json",
  "todomocop-core",
+ "todomocop-sync",
  "ureq",
 ]
 
@@ -1327,6 +1328,7 @@ name = "todomocop-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "serde",
  "serde_json",
  "todomocop-core",
