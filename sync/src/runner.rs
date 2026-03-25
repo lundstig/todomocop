@@ -92,3 +92,144 @@ fn apply_one(db: &Db, action: &SyncAction) -> Result<ActionKind> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use todomocop_core::Db;
+    use todomocop_core::types::{TaskFilter, TaskStatus};
+    use crate::types::*;
+
+    #[test]
+    fn integration_create_and_complete_github() {
+        let db = Db::open_in_memory().unwrap();
+
+        // 1. Create a task from a GitHub PR
+        let actions = vec![SyncAction::CreateTaskWithGithub {
+            title: "Fix bug".into(),
+            pr: CreateGithubLink {
+                url: "https://github.com/o/r/pull/1".into(),
+                repo: "o/r".into(),
+                number: 1,
+                title: "Fix bug".into(),
+                author: "me".into(),
+                reviewers: Vec::new(),
+                review_state: HashMap::new(),
+            },
+            status: TaskStatus::Ready,
+        }];
+
+        let summary = apply_actions(&db, &actions);
+        assert_eq!(summary.created, 1);
+        assert!(summary.errors.is_empty());
+
+        // Verify task exists
+        let tasks = db.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Fix bug");
+        assert_eq!(tasks[0].status, TaskStatus::Ready);
+        assert_eq!(tasks[0].workspace, "work");
+
+        // 2. Mark it done
+        let done_actions = vec![SyncAction::MarkDone { task_id: tasks[0].id }];
+        let summary = apply_actions(&db, &done_actions);
+        assert_eq!(summary.completed, 1);
+
+        let task = db.get_task(tasks[0].id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn integration_create_and_cancel_linear() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Create a task from a Linear issue
+        let actions = vec![SyncAction::CreateTaskWithLinear {
+            title: "Build feature".into(),
+            linear: CreateLinearLink {
+                identifier: "ENG-42".into(),
+                url: "https://linear.app/team/issue/ENG-42/build-feature".into(),
+                state_type: "started".into(),
+            },
+            status: TaskStatus::InProgress,
+            priority: Some(2),
+        }];
+
+        let summary = apply_actions(&db, &actions);
+        assert_eq!(summary.created, 1);
+        assert!(summary.errors.is_empty());
+
+        let tasks = db.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, TaskStatus::InProgress);
+        assert_eq!(tasks[0].priority, Some(2));
+
+        // Cancel it (issue unassigned)
+        let cancel_actions = vec![SyncAction::MarkCanceled { task_id: tasks[0].id }];
+        let summary = apply_actions(&db, &cancel_actions);
+        assert_eq!(summary.canceled, 1);
+
+        let task = db.get_task(tasks[0].id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Canceled);
+    }
+
+    #[test]
+    fn integration_update_status() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Create a task
+        let actions = vec![SyncAction::CreateTaskWithLinear {
+            title: "Feature".into(),
+            linear: CreateLinearLink {
+                identifier: "ENG-1".into(),
+                url: "https://linear.app/t/issue/ENG-1/f".into(),
+                state_type: "unstarted".into(),
+            },
+            status: TaskStatus::Ready,
+            priority: None,
+        }];
+        apply_actions(&db, &actions);
+
+        let tasks = db.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(tasks[0].status, TaskStatus::Ready);
+
+        // Update status to in_progress
+        let update_actions = vec![SyncAction::UpdateStatus {
+            task_id: tasks[0].id,
+            status: TaskStatus::InProgress,
+        }];
+        let summary = apply_actions(&db, &update_actions);
+        assert_eq!(summary.updated, 1);
+
+        let task = db.get_task(tasks[0].id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::InProgress);
+    }
+
+    #[test]
+    fn integration_errors_dont_stop_processing() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Mix of valid and invalid actions
+        let actions = vec![
+            SyncAction::MarkDone { task_id: 999 }, // nonexistent task
+            SyncAction::CreateTaskWithGithub {
+                title: "Valid task".into(),
+                pr: CreateGithubLink {
+                    url: "https://github.com/o/r/pull/2".into(),
+                    repo: "o/r".into(),
+                    number: 2,
+                    title: "Valid task".into(),
+                    author: "me".into(),
+                    reviewers: Vec::new(),
+                    review_state: HashMap::new(),
+                },
+                status: TaskStatus::Ready,
+            },
+        ];
+
+        let summary = apply_actions(&db, &actions);
+        assert_eq!(summary.errors.len(), 1); // first action failed
+        assert_eq!(summary.created, 1); // second action succeeded
+    }
+}
