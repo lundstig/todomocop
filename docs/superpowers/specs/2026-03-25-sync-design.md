@@ -20,7 +20,7 @@ cli/      — CLI (+ `todo sync github`, `todo sync linear`, `todo sync`)
 
 Added to `TaskStatus`: `idea | ready | in_progress | done | canceled`.
 
-`canceled` tasks are hidden from default list views, same as `done`.
+Currently neither `done` nor `canceled` tasks are excluded by default in `list_tasks` — the caller must pass a status filter. This is unchanged; the CLI and MCP layers decide what to show.
 
 ### Multiple external links per task
 
@@ -30,7 +30,11 @@ A task can have multiple GitHub PRs (e.g. frontend + backend PRs for one Linear 
 
 **Change:** `Task` fields become `Vec<GithubPrContextData>` and `Vec<LinearContextData>`. Load methods return all linked contexts. Refresh methods iterate over all. MCP/CLI output includes all links.
 
-This is a prerequisite for both sync and correct completion logic.
+This is a breaking change to the MCP JSON output (field goes from `null`/object to array). Since this is a personal tool with no external consumers, we change it in place.
+
+### Uniqueness constraints
+
+Add `#[unique]` to `GithubPrContext.url` and `LinearContext.identifier`. A given PR or Linear issue can only be linked to one task. This makes `find_task_by_*` unambiguous and prevents duplicate links on re-sync.
 
 ### Lookup-by-source queries
 
@@ -43,6 +47,22 @@ These are the dedup primitives used by sync.
 
 ## Sync Crate
 
+### Design
+
+The reconciliation logic is **pure**: given external items + existing tasks, it produces a list of `SyncAction`s. The sync runner then applies each action as an individual DB transaction. This means partial failures are safe — re-running sync will skip already-applied actions via the dedup queries.
+
+```rust
+enum SyncAction {
+    CreateTask { title, link, workspace, priority, status },
+    MarkDone { task_id },
+    MarkCanceled { task_id },
+    UpdateStatus { task_id, status },  // e.g. Linear started → in_progress
+}
+
+fn reconcile_github(prs: &[GithubPr], existing: &[Task]) -> Vec<SyncAction>;
+fn reconcile_linear(issues: &[LinearIssue], existing: &[Task]) -> Vec<SyncAction>;
+```
+
 ### GitHub sync
 
 **Input:** GitHub API — fetch PRs where the authenticated user is author or requested reviewer.
@@ -51,9 +71,12 @@ These are the dedup primitives used by sync.
 - `GET /search/issues?q=type:pr+author:{user}+is:open` — open authored PRs
 - `GET /search/issues?q=type:pr+review-requested:{user}+is:open` — open review requests
 - `GET /search/issues?q=type:pr+author:{user}+is:closed+merged:>={since}` — recently merged/closed authored PRs (for completion)
-- `GET /search/issues?q=type:pr+reviewed-by:{user}+is:closed+merged:>={since}` — recently closed PRs the user reviewed (for review task completion)
 
-The `{user}` is fetched once via `GET /user`. The `{since}` window is configurable (default: 7 days).
+For review-requested PRs that are still open, also check `GET /repos/{owner}/{repo}/pulls/{number}/reviews` to detect if the user has already submitted a review.
+
+The `{user}` is fetched once via `GET /user`. The `{since}` window defaults to 7 days, configurable via `--since` CLI flag.
+
+**Known limitations:** GitHub search API is rate-limited (30 req/min) and capped at 1000 results. Acceptable for personal use.
 
 **Reconciliation rules:**
 
@@ -63,9 +86,8 @@ The `{user}` is fetched once via `GET /user`. The `{since}` window is configurab
 | Review-requested PR, no matching task | Create task ("Review: {PR title}"), link PR |
 | Authored PR merged, task has no Linear link | Mark task `done` |
 | Authored PR closed (not merged) | No status change; link is ignored for completion |
-| User submitted review on PR | Mark review task `done` |
-
-**How to detect "user submitted review":** `GET /repos/{owner}/{repo}/pulls/{number}/reviews` — check if any review has `user.login == authenticated_user`. If yes, the review task is done.
+| User submitted review on PR (open or closed) | Mark review task `done` |
+| Merged PR found but no existing task | Ignore (don't create retroactive tasks) |
 
 ### Linear sync
 
@@ -77,7 +99,7 @@ The `{user}` is fetched once via `GET /user`. The `{since}` window is configurab
   viewer {
     id
     assignedIssues(
-      filter: { state: { type: { nin: ["triage"] } } }
+      filter: { state: { type: { nin: ["triage", "completed", "canceled"] } } }
       first: 100
     ) {
       nodes {
@@ -90,16 +112,22 @@ The `{user}` is fetched once via `GET /user`. The `{since}` window is configurab
 }
 ```
 
-This gives us all non-triage issues assigned to the user. We use `state.type` (Linear's built-in state categories: `backlog`, `unstarted`, `started`, `completed`, `canceled`) for logic.
+This fetches active issues only (backlog, unstarted, started). Completed/canceled detection works by absence: if a previously-synced task's Linear issue is no longer in the results, we check why.
+
+To distinguish "completed/canceled" from "unassigned", the sync does a targeted lookup for missing issues:
+```graphql
+{ issue(id: "...") { state { type } assignee { id } } }
+```
 
 **Reconciliation rules:**
 
 | Condition | Action |
 |-----------|--------|
 | Assigned issue, no matching task | Create task (title from issue title), link Linear |
-| Issue state type `completed` | Mark task `done` |
-| Issue state type `canceled` | Mark task `canceled` |
-| Issue previously assigned, now unassigned (not in API results but task exists) | Mark task `canceled` |
+| Assigned issue `started`, existing task not `in_progress` | Update task to `in_progress` |
+| Issue no longer in results, lookup shows `completed` | Mark task `done` |
+| Issue no longer in results, lookup shows `canceled` | Mark task `canceled` |
+| Issue no longer in results, lookup shows reassigned | Mark task `canceled` |
 
 ### Cross-source completion logic
 
@@ -115,15 +143,16 @@ A task may have multiple GitHub PRs and/or multiple Linear issues. The rules:
 - Closed (not merged) PRs are ignored (neither blocking nor satisfying completion).
 - If all PRs are either merged or closed-without-merge, and at least one is merged → task `done`.
 
-**Review tasks** (GitHub only, never linked to Linear):
+**Review tasks** (created by GitHub sync for review requests):
 - Done when the user has submitted a review, regardless of PR state.
+- If a user manually links a Linear issue to a review task, Linear becomes authoritative (same as any other task). This is a soft convention, not enforced.
 
 **No external links:**
 - Manual status management only.
 
 ### Task creation details
 
-- **Workspace:** `"work"` for both GitHub and Linear tasks (configurable later if needed).
+- **Workspace:** `"work"` for both GitHub and Linear tasks.
 - **Priority:** For Linear tasks, map Linear priority (1=urgent, 2=high, 3=medium, 4=low) directly to todomocop priority. GitHub tasks get no priority.
 - **Status:** New tasks are created as `ready`. If Linear state type is `started`, create as `in_progress`.
 
@@ -133,6 +162,7 @@ A task may have multiple GitHub PRs and/or multiple Linear issues. The rules:
 todo sync              # sync both GitHub and Linear
 todo sync github       # sync GitHub PRs only
 todo sync linear       # sync Linear issues only
+todo sync --since 14d  # override the lookback window (default: 7d)
 ```
 
 All commands read `GITHUB_TOKEN` and `LINEAR_API_KEY` from environment variables (same as existing CLI).
@@ -143,17 +173,7 @@ Output: summary of actions taken (e.g. "Created 2 tasks, updated 1, completed 1"
 
 ### Unit tests (sync crate)
 
-The reconciliation logic is pure: given a list of external items and a list of existing tasks, produce a list of actions (create, update status, etc.). This core is tested with mock data, no API or DB needed.
-
-```rust
-struct SyncAction {
-    kind: SyncActionKind, // Create, MarkDone, MarkCanceled
-    // ...
-}
-
-fn reconcile_github(prs: &[GithubPr], existing_tasks: &[Task]) -> Vec<SyncAction>;
-fn reconcile_linear(issues: &[LinearIssue], existing_tasks: &[Task]) -> Vec<SyncAction>;
-```
+The reconciliation logic is pure — tested with mock data, no API or DB needed.
 
 Test cases:
 - New PR with no existing task → Create action
@@ -162,10 +182,13 @@ Test cases:
 - Existing task, PR closed (not merged) → no action
 - Existing task, two PRs: one merged, one open, no Linear → no action (not all done)
 - Existing task, two PRs: one merged, one closed (not merged), no Linear → MarkDone (closed is ignored)
-- Review PR, user has submitted review → MarkDone action
+- Review PR, user has submitted review (PR still open) → MarkDone action
+- Review PR, user has not reviewed → no action
+- Merged PR found, no existing task → no action (no retroactive creation)
 - Linear issue completed → MarkDone action
 - Linear issue canceled → MarkCanceled action
 - Linear issue unassigned → MarkCanceled action
+- Linear issue `started`, existing task is `ready` → UpdateStatus to `in_progress`
 - Linear issue assigned, existing task already done → no action (don't resurrect)
 
 ### Integration tests (sync crate + core)
@@ -174,5 +197,7 @@ Use `Db::open_in_memory()` with mock `HttpClient` to test the full flow: API res
 
 ### Core tests
 
-Test new `find_task_by_github_pr` and `find_task_by_linear_issue` queries against in-memory DB.
-Test `canceled` status works correctly in list/search filters.
+- `find_task_by_github_pr` and `find_task_by_linear_issue` queries against in-memory DB
+- `canceled` status roundtrips correctly through add/edit/list
+- Multiple links per task: load and refresh all contexts
+- Uniqueness: linking same PR URL to two tasks fails
