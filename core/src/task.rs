@@ -745,6 +745,34 @@ mod tests {
             assert_eq!(task_after.github_pr_contexts[0].state, "merged");
         }
 
+        // --- test: find_task_by_github_pr ---
+        {
+            let found = db.find_task_by_github_pr("https://github.com/rust-lang/rust/pull/42").unwrap();
+            assert!(found.is_some());
+            assert_eq!(found.unwrap().title, "PR task");
+
+            let not_found = db.find_task_by_github_pr("https://github.com/owner/repo/pull/999").unwrap();
+            assert!(not_found.is_none());
+        }
+
+        // --- test: find_task_by_linear_issue ---
+        {
+            let found = db.find_task_by_linear_issue("ENG-123").unwrap();
+            assert!(found.is_some());
+            assert_eq!(found.unwrap().title, "Linear task");
+
+            let not_found = db.find_task_by_linear_issue("ENG-999").unwrap();
+            assert!(not_found.is_none());
+        }
+
+        // --- test: uniqueness — same PR URL on two tasks fails ---
+        {
+            let t1 = db.add_task(make_add_task("Unique test 1", "work")).unwrap();
+            let t2 = db.add_task(make_add_task("Unique test 2", "work")).unwrap();
+            db.link_github_pr(t1, "https://github.com/owner/repo/pull/777").unwrap();
+            assert!(db.link_github_pr(t2, "https://github.com/owner/repo/pull/777").is_err());
+        }
+
         // --- test: canceled status roundtrips ---
         {
             let canceled_id = db.add_task(make_add_task("Cancel me", "work")).unwrap();

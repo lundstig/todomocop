@@ -74,6 +74,23 @@ impl Db {
         })
     }
 
+    pub fn find_task_by_linear_issue(&self, identifier: &str) -> Result<Option<Task>> {
+        let task_ids: Vec<i64> = self.database.transaction(|txn| {
+            txn.query(|q| {
+                let task = q.join(schema::Task);
+                let ctx = q.join(schema::LinearContext);
+                q.filter(ctx.task.eq(&task));
+                q.filter(ctx.identifier.eq(identifier));
+                q.into_vec(&task.external_id)
+            })
+        });
+
+        match task_ids.into_iter().next() {
+            Some(id) => self.get_task(id),
+            None => Ok(None),
+        }
+    }
+
     /// Load all LinearContexts for a given task (by external_id).
     pub(crate) fn load_linear_contexts(&self, task_id: TaskId) -> Result<Vec<LinearContextData>> {
         let results: Vec<LinearContextSelect> = self.database.transaction(|txn| {

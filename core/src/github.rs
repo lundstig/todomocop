@@ -74,6 +74,23 @@ impl Db {
         })
     }
 
+    pub fn find_task_by_github_pr(&self, pr_url: &str) -> Result<Option<Task>> {
+        let task_ids: Vec<i64> = self.database.transaction(|txn| {
+            txn.query(|q| {
+                let task = q.join(schema::Task);
+                let ctx = q.join(schema::GithubPrContext);
+                q.filter(ctx.task.eq(&task));
+                q.filter(ctx.url.eq(pr_url));
+                q.into_vec(&task.external_id)
+            })
+        });
+
+        match task_ids.into_iter().next() {
+            Some(id) => self.get_task(id),
+            None => Ok(None),
+        }
+    }
+
     /// Load all GithubPrContexts for a given task (by external_id).
     pub(crate) fn load_github_contexts(&self, task_id: TaskId) -> Result<Vec<GithubPrContextData>> {
         let results: Vec<GithubContextSelect> = self.database.transaction(|txn| {
