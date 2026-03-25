@@ -114,11 +114,36 @@ enum Commands {
         /// Snooze until date (e.g. 2026-04-01)
         until: String,
     },
+    /// Sync tasks from external sources
+    Sync {
+        #[command(subcommand)]
+        source: Option<SyncSource>,
+        /// Lookback window for recently closed PRs (default: 7d)
+        #[arg(long, default_value = "7d")]
+        since: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncSource {
+    /// Sync GitHub PRs
+    Github,
+    /// Sync Linear issues
+    Linear,
 }
 
 // ---------------------------------------------------------------------------
 // Output helpers
 // ---------------------------------------------------------------------------
+
+fn parse_duration_days(s: &str) -> anyhow::Result<u64> {
+    let s = s.trim();
+    if let Some(days) = s.strip_suffix('d') {
+        days.parse().map_err(|_| anyhow::anyhow!("invalid duration: {s}"))
+    } else {
+        s.parse().map_err(|_| anyhow::anyhow!("invalid duration: {s}, expected format like '7d'"))
+    }
+}
 
 fn format_task_line(task: &todomocop_core::types::Task) -> String {
     match task.priority {
@@ -155,7 +180,7 @@ fn main() -> Result<()> {
     };
 
     let http: Arc<dyn HttpClient> = Arc::new(UreqHttpClient);
-    let db = Db::open(&db_path, http, config)?;
+    let db = Db::open(&db_path, Arc::clone(&http), config)?;
 
     match cli.command {
         Commands::Add {
@@ -255,6 +280,37 @@ fn main() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("invalid date '{}': {e}", until))?;
             db.snooze(id, date)?;
             println!("Snoozed task #{id} until {until}");
+        }
+
+        Commands::Sync { source, since } => {
+            let since_days = parse_duration_days(&since)?;
+
+            let do_github = source.is_none() || matches!(source, Some(SyncSource::Github));
+            let do_linear = source.is_none() || matches!(source, Some(SyncSource::Linear));
+
+            let existing = db.list_tasks(TaskFilter::default())?;
+            let mut all_actions = Vec::new();
+
+            if do_github {
+                let token = std::env::var("GITHUB_TOKEN")
+                    .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN not set"))?;
+                let github = todomocop_sync::github::GithubClient::new(http.as_ref(), token)?;
+                let prs = github.fetch_prs(since_days)?;
+                let actions = todomocop_sync::reconcile::reconcile_github(&prs, &existing, github.username());
+                all_actions.extend(actions);
+            }
+
+            if do_linear {
+                let api_key = std::env::var("LINEAR_API_KEY")
+                    .map_err(|_| anyhow::anyhow!("LINEAR_API_KEY not set"))?;
+                let linear = todomocop_sync::linear::LinearClient::new(http.as_ref(), api_key);
+                let issues = linear.fetch_assigned_issues()?;
+                let actions = todomocop_sync::reconcile::reconcile_linear(&issues, &existing);
+                all_actions.extend(actions);
+            }
+
+            let summary = todomocop_sync::runner::apply_actions(&db, &all_actions);
+            println!("{summary}");
         }
     }
 

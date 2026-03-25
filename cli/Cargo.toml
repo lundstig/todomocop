@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 todomocop-core = { path = "../core" }
+todomocop-sync = { path = "../sync" }
 clap = { version = "4", features = ["derive", "env"] }
 chrono = "0.4"
 serde_json = "1"
