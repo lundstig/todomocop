@@ -169,9 +169,8 @@ A task may have multiple GitHub PRs and/or multiple Linear issues. The rules:
 **For non-review tasks:**
 
 **Has any Linear link → Linear is authoritative:**
-- Task `done` only when **ALL** linked Linear issues have `state_type == "completed"`.
-- Task `canceled` only when **ALL** linked Linear issues are either `"completed"` or `"canceled"`, and at least one is `"canceled"`.
 - If any Linear issue is still active (`backlog`/`unstarted`/`started`), no status change.
+- Once ALL are terminal (`completed` or `canceled`): if at least one is `completed` → task `done`. If ALL are `canceled` → task `canceled`.
 - GitHub PR state does not affect task status when Linear links exist.
 
 **Has GitHub PR(s) but no Linear link → GitHub is authoritative:**
@@ -221,9 +220,10 @@ Test cases — GitHub:
 Test cases — Linear:
 - Assigned issue, no matching task → Create action
 - Issue `started`, existing task is `ready` → UpdateStatus to `in_progress`
-- One Linear issue `completed`, another still `started` → no action (not all done)
+- One Linear issue `completed`, another still `started` → no action (not all terminal)
 - All Linear issues `completed` → MarkDone
-- All Linear issues `completed` or `canceled`, at least one `canceled` → MarkCanceled
+- Two issues: one `completed`, one `canceled` → MarkDone (at least one completed)
+- All Linear issues `canceled` (none completed) → MarkCanceled
 - Issue unassigned (missing from results) → MarkCanceled
 - Issue assigned, existing task already done → no action (don't resurrect)
 
