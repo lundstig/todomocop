@@ -32,9 +32,37 @@ A task can have multiple GitHub PRs (e.g. frontend + backend PRs for one Linear 
 
 This is a breaking change to the MCP JSON output (field goes from `null`/object to array). Since this is a personal tool with no external consumers, we change it in place.
 
-### Uniqueness constraints
+### Schema changes
 
-Add `#[unique]` to `GithubPrContext.url` and `LinearContext.identifier`. A given PR or Linear issue can only be linked to one task. This makes `find_task_by_*` unambiguous and prevents duplicate links on re-sync.
+**`GithubPrContext`** — expanded to store participant data:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `task` | FK → Task | (existing) |
+| `url` | String, `#[unique]` | (existing, now unique) |
+| `repo` | String | (existing) |
+| `number` | i64 | (existing) |
+| `state` | String | (existing) `"open"`, `"merged"`, `"closed"` |
+| `title` | String | **new** — PR title for display |
+| `author` | String | **new** — GitHub username of PR author |
+| `reviewers` | String | **new** — JSON array of requested reviewer usernames |
+| `review_state` | String | **new** — JSON object: `{"alice": "approved", "bob": "pending"}` |
+| `last_refreshed` | String | (existing) |
+
+The sync derives the user's role from `author` vs presence in `reviewers`. No separate `role` column needed.
+
+**`LinearContext`** — add explicit state column:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `task` | FK → Task | (existing) |
+| `url` | String | (existing) |
+| `identifier` | String, `#[unique]` | (existing, now unique) |
+| `state_type` | String | **new** — `"backlog"`, `"unstarted"`, `"started"`, `"completed"`, `"canceled"` |
+| `data` | String | (existing) JSON blob with full issue data |
+| `last_refreshed` | String | (existing) |
+
+Uniqueness on `GithubPrContext.url` and `LinearContext.identifier` ensures a given PR or Linear issue can only be linked to one task. This makes `find_task_by_*` unambiguous and prevents duplicate links on re-sync.
 
 ### Lookup-by-source queries
 
@@ -82,11 +110,12 @@ The `{user}` is fetched once via `GET /user`. The `{since}` window defaults to 7
 
 | Condition | Action |
 |-----------|--------|
-| Authored PR, no matching task | Create task (title from PR title), link PR |
-| Review-requested PR, no matching task | Create task ("Review: {PR title}"), link PR |
-| Authored PR merged, task has no Linear link | Mark task `done` |
-| Authored PR closed (not merged) | No status change; link is ignored for completion |
-| User submitted review on PR (open or closed) | Mark review task `done` |
+| Authored PR, no matching task | Create task (title from PR title), link PR with author/reviewers/review_state |
+| Review-requested PR, no matching task | Create task ("Review: {PR title}"), link PR with author/reviewers/review_state |
+| PR state/reviews changed | Update stored `state`, `reviewers`, `review_state` on the link |
+| Review task where `review_state[me] != "pending"` | Mark review task `done` |
+| Non-review task: all non-closed PRs merged, no Linear links | Mark task `done` (cross-source logic) |
+| PR closed (not merged) | No status change; link is ignored for completion |
 | Merged PR found but no existing task | Ignore (don't create retroactive tasks) |
 
 ### Linear sync
@@ -133,19 +162,21 @@ To distinguish "completed/canceled" from "unassigned", the sync does a targeted 
 
 A task may have multiple GitHub PRs and/or multiple Linear issues. The rules:
 
-**Has any Linear link:**
-- **Linear is authoritative.** If any Linear issue is `completed` → task `done`. If any is `canceled` and none are active → task `canceled`.
-- GitHub PR state alone does not change task status.
-- Closed (not merged) PRs are ignored entirely.
+**Review tasks** (where user is in `reviewers`) follow their own logic:
+- Done when `review_state[me]` is not `"pending"` (i.e. user has submitted a review).
+- PR state and Linear links are irrelevant for review tasks.
 
-**Has GitHub PR(s) but no Linear link:**
-- All non-ignored PRs must be merged for the task to be `done`.
+**For non-review tasks:**
+
+**Has any Linear link → Linear is authoritative:**
+- Task `done` only when **ALL** linked Linear issues have `state_type == "completed"`.
+- Task `canceled` only when **ALL** linked Linear issues are either `"completed"` or `"canceled"`, and at least one is `"canceled"`.
+- If any Linear issue is still active (`backlog`/`unstarted`/`started`), no status change.
+- GitHub PR state does not affect task status when Linear links exist.
+
+**Has GitHub PR(s) but no Linear link → GitHub is authoritative:**
 - Closed (not merged) PRs are ignored (neither blocking nor satisfying completion).
-- If all PRs are either merged or closed-without-merge, and at least one is merged → task `done`.
-
-**Review tasks** (created by GitHub sync for review requests):
-- Done when the user has submitted a review, regardless of PR state.
-- If a user manually links a Linear issue to a review task, Linear becomes authoritative (same as any other task). This is a soft convention, not enforced.
+- Task `done` only when **ALL** non-closed PRs are `"merged"` (and at least one exists).
 
 **No external links:**
 - Manual status management only.
@@ -175,21 +206,26 @@ Output: summary of actions taken (e.g. "Created 2 tasks, updated 1, completed 1"
 
 The reconciliation logic is pure — tested with mock data, no API or DB needed.
 
-Test cases:
-- New PR with no existing task → Create action
-- Existing task, PR merged, no Linear link → MarkDone action
-- Existing task, PR merged, has Linear link → no action (Linear is authoritative)
-- Existing task, PR closed (not merged) → no action
-- Existing task, two PRs: one merged, one open, no Linear → no action (not all done)
-- Existing task, two PRs: one merged, one closed (not merged), no Linear → MarkDone (closed is ignored)
-- Review PR, user has submitted review (PR still open) → MarkDone action
-- Review PR, user has not reviewed → no action
+Test cases — GitHub:
+- New authored PR, no existing task → Create action
+- New review-requested PR, no existing task → Create action with "Review:" prefix
+- Review task, `review_state[me]` is `"approved"` → MarkDone
+- Review task, `review_state[me]` is `"pending"` → no action
+- Authored PR merged, no Linear link on task → MarkDone
+- Authored PR merged, has Linear link on task → no action (Linear is authoritative)
+- Authored PR closed (not merged) → no action
+- Two authored PRs, one merged one open, no Linear → no action (not all done)
+- Two authored PRs, one merged one closed (not merged), no Linear → MarkDone (closed is ignored)
 - Merged PR found, no existing task → no action (no retroactive creation)
-- Linear issue completed → MarkDone action
-- Linear issue canceled → MarkCanceled action
-- Linear issue unassigned → MarkCanceled action
-- Linear issue `started`, existing task is `ready` → UpdateStatus to `in_progress`
-- Linear issue assigned, existing task already done → no action (don't resurrect)
+
+Test cases — Linear:
+- Assigned issue, no matching task → Create action
+- Issue `started`, existing task is `ready` → UpdateStatus to `in_progress`
+- One Linear issue `completed`, another still `started` → no action (not all done)
+- All Linear issues `completed` → MarkDone
+- All Linear issues `completed` or `canceled`, at least one `canceled` → MarkCanceled
+- Issue unassigned (missing from results) → MarkCanceled
+- Issue assigned, existing task already done → no action (don't resurrect)
 
 ### Integration tests (sync crate + core)
 
