@@ -497,7 +497,206 @@ git commit -am "feat: handle dedup link actions in sync runner"
 
 ---
 
-### Task 5: End-to-end verification
+### Task 5: Full round-trip integration test
+
+**Files:**
+- Modify: `sync/src/runner.rs` (add to existing tests)
+
+- [ ] **Step 1: Write the full round-trip dedup test**
+
+Add to the existing `mod tests` in `sync/src/runner.rs`:
+
+```rust
+#[test]
+fn integration_github_first_then_linear_deduplicates() {
+    let db = Db::open_in_memory().unwrap();
+
+    // Step 1: GitHub sync creates a task for a PR
+    let gh_actions = vec![SyncAction::CreateTaskWithGithub {
+        title: "Fix bug".into(),
+        pr: CreateGithubLink {
+            url: "https://github.com/o/r/pull/100".into(),
+            repo: "o/r".into(),
+            number: 100,
+            title: "Fix bug".into(),
+            author: "me".into(),
+            reviewers: Vec::new(),
+            review_state: HashMap::new(),
+        },
+        status: TaskStatus::Ready,
+    }];
+    let summary = apply_actions(&db, &gh_actions);
+    assert_eq!(summary.created, 1);
+
+    // Step 2: Linear sync runs — issue has this PR attached
+    let existing = db.list_tasks(TaskFilter::default()).unwrap();
+    assert_eq!(existing.len(), 1);
+
+    let issue = crate::types::LinearIssue {
+        identifier: "ENG-100".into(),
+        title: "Fix bug".into(),
+        url: "https://linear.app/t/issue/ENG-100/fix-bug".into(),
+        state_type: "started".into(),
+        priority: Some(1),
+        github_pr_urls: vec!["https://github.com/o/r/pull/100".into()],
+    };
+
+    let linear_actions = crate::reconcile::reconcile_linear(&[issue], &existing);
+
+    // Should produce a link action, NOT a create action
+    assert!(!linear_actions.iter().any(|a| matches!(a, SyncAction::CreateTaskWithLinear { .. })));
+    assert!(linear_actions.iter().any(|a| matches!(a, SyncAction::LinkLinearToExistingTask { .. })));
+
+    // Step 3: Apply the link actions
+    let summary = apply_actions(&db, &linear_actions);
+    assert!(summary.errors.is_empty());
+
+    // Step 4: Verify — still one task, now with both links
+    let tasks = db.list_tasks(TaskFilter::default()).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].github_pr_contexts.len(), 1);
+    assert_eq!(tasks[0].linear_contexts.len(), 1);
+    assert_eq!(tasks[0].linear_contexts[0].identifier, "ENG-100");
+}
+
+#[test]
+fn integration_linear_first_then_github_deduplicates() {
+    let db = Db::open_in_memory().unwrap();
+
+    // Step 1: Linear sync creates a task with a PR attachment
+    let linear_issue = crate::types::LinearIssue {
+        identifier: "ENG-200".into(),
+        title: "New feature".into(),
+        url: "https://linear.app/t/issue/ENG-200/new-feature".into(),
+        state_type: "started".into(),
+        priority: None,
+        github_pr_urls: vec!["https://github.com/o/r/pull/200".into()],
+    };
+
+    let linear_actions = crate::reconcile::reconcile_linear(&[linear_issue], &[]);
+    // No existing tasks, so it creates
+    assert!(linear_actions.iter().any(|a| matches!(a, SyncAction::CreateTaskWithLinear { .. })));
+    apply_actions(&db, &linear_actions);
+
+    let tasks = db.list_tasks(TaskFilter::default()).unwrap();
+    assert_eq!(tasks.len(), 1);
+
+    // Step 2: GitHub sync runs — same PR exists
+    let pr = crate::types::GithubPr {
+        url: "https://github.com/o/r/pull/200".into(),
+        repo: "o/r".into(),
+        number: 200,
+        title: "New feature".into(),
+        state: crate::types::GithubPrState::Open,
+        author: "me".into(),
+        reviewers: Vec::new(),
+        review_state: HashMap::new(),
+    };
+
+    // But wait — the task created by Linear sync doesn't have a github_pr_context
+    // because CreateTaskWithLinear only links Linear, not the PR.
+    // The PR attachment linking happens via LinkGithubPrToExistingTask in the SAME
+    // Linear reconcile run. Let's verify that happened:
+    // Actually, CreateTaskWithLinear in the runner only calls link_linear, not link_github_pr.
+    // The reconcile would need to also emit LinkGithubPrToExistingTask for the newly created task.
+    // BUT the task doesn't exist yet during reconciliation (it's a Create action).
+    //
+    // This means: after Linear sync creates the task, GitHub sync will NOT find it via
+    // find_task_by_github_pr because the PR wasn't linked. GitHub sync creates a duplicate!
+    //
+    // This is a gap. For now, verify the current behavior and document it.
+    let gh_actions = crate::reconcile::reconcile_github(&[pr], &tasks, "me");
+
+    // With current implementation: GitHub sync won't find the PR linked to the task,
+    // so it would try to create. This test documents the gap.
+    // Once we fix CreateTaskWithLinear to also link attached PRs, this should produce 0 actions.
+    if gh_actions.iter().any(|a| matches!(a, SyncAction::CreateTaskWithGithub { .. })) {
+        panic!(
+            "BUG: GitHub sync would create a duplicate! \
+             CreateTaskWithLinear must also link attached PRs. \
+             Fix: either emit LinkGithubPr actions for PR attachments during creation, \
+             or have the runner link PRs when creating a Linear task."
+        );
+    }
+}
+```
+
+- [ ] **Step 2: Run tests**
+
+Run: `nix develop --command cargo test -p todomocop-sync`
+
+The second test (`linear_first_then_github`) will likely fail, revealing the gap: when Linear sync creates a new task, PR attachments from the issue need to also be linked to the new task. Otherwise the subsequent GitHub sync creates a duplicate.
+
+**Fix options:**
+1. Have `CreateTaskWithLinear` carry the `github_pr_urls` so the runner links them during creation
+2. Have `reconcile_linear` emit separate `LinkGithubPrToExistingTask` actions after creation — but the task doesn't exist yet during reconciliation
+
+Option 1 is cleaner. Add `github_pr_urls: Vec<String>` to the `CreateTaskWithLinear` variant, and have the runner call `link_github_pr` for each URL after creating the task.
+
+- [ ] **Step 3: Fix `CreateTaskWithLinear` to carry PR URLs**
+
+In `sync/src/types.rs`, update the variant:
+
+```rust
+CreateTaskWithLinear {
+    title: String,
+    linear: CreateLinearLink,
+    status: TaskStatus,
+    priority: Option<i64>,
+    github_pr_urls: Vec<String>,  // NEW
+},
+```
+
+In `sync/src/runner.rs`, update the handler:
+
+```rust
+SyncAction::CreateTaskWithLinear { title, linear, status, priority, github_pr_urls } => {
+    let task_id = db.add_task(AddTask {
+        title: title.clone(),
+        description: None,
+        status: Some(*status),
+        priority: *priority,
+        workspace: "work".into(),
+        deadline: None,
+        planned_date: None,
+    })?;
+    db.link_linear(task_id, &linear.url)?;
+    for pr_url in github_pr_urls {
+        // Best effort — PR might not be a valid GitHub URL if Linear has odd attachments
+        let _ = db.link_github_pr(task_id, pr_url);
+    }
+    Ok(ActionKind::Created)
+}
+```
+
+In `sync/src/reconcile.rs`, update where `CreateTaskWithLinear` is constructed (two places — the creation in the dedup logic and the original creation):
+
+```rust
+actions.push(SyncAction::CreateTaskWithLinear {
+    title: issue.title.clone(),
+    linear: CreateLinearLink { ... },
+    status,
+    priority: issue.priority,
+    github_pr_urls: issue.github_pr_urls.clone(),  // NEW
+});
+```
+
+Fix all test constructors that build `CreateTaskWithLinear` to include `github_pr_urls: vec![]`.
+
+- [ ] **Step 4: Run all tests**
+
+Run: `nix develop --command cargo test --workspace`
+Expected: All tests pass, including both new integration tests.
+
+- [ ] **Step 5: Commit**
+
+```
+git commit -am "feat: link PR attachments when creating Linear tasks, full round-trip tests"
+```
+
+---
+
+### Task 6: End-to-end verification
 
 - [ ] **Step 1: Run against real APIs with a fresh DB**
 
