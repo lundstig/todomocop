@@ -131,6 +131,14 @@ pub fn reconcile_linear(issues: &[LinearIssue], existing: &[Task]) -> Vec<SyncAc
         }
     }
 
+    // Index tasks by their linked GitHub PR URLs for cross-source dedup
+    let mut task_by_pr_url: HashMap<&str, &Task> = HashMap::new();
+    for task in existing {
+        for ctx in &task.github_pr_contexts {
+            task_by_pr_url.insert(&ctx.url, task);
+        }
+    }
+
     let mut actions = Vec::new();
 
     // Check for new issues not linked to any task
@@ -139,22 +147,39 @@ pub fn reconcile_linear(issues: &[LinearIssue], existing: &[Task]) -> Vec<SyncAc
             continue;
         }
 
-        let status = if issue.state_type == "started" {
-            TaskStatus::InProgress
-        } else {
-            TaskStatus::Ready
-        };
+        // Cross-source dedup: check if any PR attachment matches an existing task
+        let matched_task = issue
+            .github_pr_urls
+            .iter()
+            .find_map(|url| task_by_pr_url.get(url.as_str()).copied());
 
-        actions.push(SyncAction::CreateTaskWithLinear {
-            title: issue.title.clone(),
-            linear: CreateLinearLink {
-                identifier: issue.identifier.clone(),
-                url: issue.url.clone(),
-                state_type: issue.state_type.clone(),
-            },
-            status,
-            priority: issue.priority,
-        });
+        if let Some(task) = matched_task {
+            actions.push(SyncAction::LinkLinearToExistingTask {
+                task_id: task.id,
+                linear: CreateLinearLink {
+                    identifier: issue.identifier.clone(),
+                    url: issue.url.clone(),
+                    state_type: issue.state_type.clone(),
+                },
+            });
+        } else {
+            let status = if issue.state_type == "started" {
+                TaskStatus::InProgress
+            } else {
+                TaskStatus::Ready
+            };
+
+            actions.push(SyncAction::CreateTaskWithLinear {
+                title: issue.title.clone(),
+                linear: CreateLinearLink {
+                    identifier: issue.identifier.clone(),
+                    url: issue.url.clone(),
+                    state_type: issue.state_type.clone(),
+                },
+                status,
+                priority: issue.priority,
+            });
+        }
     }
 
     // Check existing tasks with Linear links
@@ -214,6 +239,26 @@ pub fn reconcile_linear(issues: &[LinearIssue], existing: &[Task]) -> Vec<SyncAc
                 task_id: task.id,
                 status: TaskStatus::InProgress,
             });
+        }
+
+        // Check for PR attachments on linked issues that aren't yet linked to the task
+        let existing_pr_urls: std::collections::HashSet<&str> = task
+            .github_pr_contexts
+            .iter()
+            .map(|ctx| ctx.url.as_str())
+            .collect();
+
+        for ctx in &task.linear_contexts {
+            if let Some(issue) = issue_by_id.get(ctx.identifier.as_str()) {
+                for pr_url in &issue.github_pr_urls {
+                    if !existing_pr_urls.contains(pr_url.as_str()) {
+                        actions.push(SyncAction::LinkGithubPrToExistingTask {
+                            task_id: task.id,
+                            pr_url: pr_url.clone(),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -701,5 +746,137 @@ mod tests {
         let actions = reconcile_linear(&[issue], &[task]);
         // Task is already done, should not produce any actions
         assert!(actions.is_empty());
+    }
+
+    // --- Cross-source dedup tests ---
+
+    #[test]
+    fn linear_issue_with_pr_attachment_deduplicates_existing_github_task() {
+        let pr_url = "https://github.com/owner/repo/pull/42";
+        let issue = LinearIssue {
+            identifier: "ENG-900".to_string(),
+            title: "Feature X".to_string(),
+            url: "https://linear.app/team/issue/ENG-900/feature-x".to_string(),
+            state_type: "started".to_string(),
+            priority: Some(1),
+            github_pr_urls: vec![pr_url.to_string()],
+        };
+
+        // Existing task linked to that PR but not to Linear
+        let mut task = make_task(1, "Feature X", TaskStatus::InProgress);
+        task.github_pr_contexts = vec![make_github_ctx(pr_url, "open")];
+
+        let actions = reconcile_linear(&[issue], &[task]);
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            SyncAction::LinkLinearToExistingTask { task_id, linear } => {
+                assert_eq!(*task_id, 1);
+                assert_eq!(linear.identifier, "ENG-900");
+            }
+            other => panic!("expected LinkLinearToExistingTask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linear_issue_with_pr_attachment_no_existing_task_creates_normally() {
+        let issue = LinearIssue {
+            identifier: "ENG-901".to_string(),
+            title: "Feature Y".to_string(),
+            url: "https://linear.app/team/issue/ENG-901/feature-y".to_string(),
+            state_type: "unstarted".to_string(),
+            priority: None,
+            github_pr_urls: vec!["https://github.com/owner/repo/pull/99".to_string()],
+        };
+
+        // No existing tasks at all
+        let actions = reconcile_linear(&[issue], &[]);
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            SyncAction::CreateTaskWithLinear { title, status, .. } => {
+                assert_eq!(title, "Feature Y");
+                assert_eq!(*status, TaskStatus::Ready);
+            }
+            other => panic!("expected CreateTaskWithLinear, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn existing_linear_task_gets_new_pr_attachment_linked() {
+        let pr_url = "https://github.com/owner/repo/pull/50";
+        let issue = LinearIssue {
+            identifier: "ENG-902".to_string(),
+            title: "Feature Z".to_string(),
+            url: "https://linear.app/team/issue/ENG-902/feature-z".to_string(),
+            state_type: "started".to_string(),
+            priority: None,
+            github_pr_urls: vec![pr_url.to_string()],
+        };
+
+        // Task already linked to Linear, but no GitHub PR context
+        let mut task = make_task(1, "Feature Z", TaskStatus::InProgress);
+        task.linear_contexts = vec![make_linear_ctx("ENG-902", "started")];
+
+        let actions = reconcile_linear(&[issue], &[task]);
+        assert_eq!(
+            actions,
+            vec![SyncAction::LinkGithubPrToExistingTask {
+                task_id: 1,
+                pr_url: pr_url.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn existing_linear_task_pr_already_linked_no_action() {
+        let pr_url = "https://github.com/owner/repo/pull/55";
+        let issue = LinearIssue {
+            identifier: "ENG-903".to_string(),
+            title: "Feature W".to_string(),
+            url: "https://linear.app/team/issue/ENG-903/feature-w".to_string(),
+            state_type: "started".to_string(),
+            priority: None,
+            github_pr_urls: vec![pr_url.to_string()],
+        };
+
+        // Task has both Linear and the same GitHub PR linked
+        let mut task = make_task(1, "Feature W", TaskStatus::InProgress);
+        task.linear_contexts = vec![make_linear_ctx("ENG-903", "started")];
+        task.github_pr_contexts = vec![make_github_ctx(pr_url, "open")];
+
+        let actions = reconcile_linear(&[issue], &[task]);
+        // No new links needed, no status changes
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn linear_issue_with_pr_attachment_existing_linear_task_also_exists() {
+        let pr_url = "https://github.com/owner/repo/pull/60";
+        let issue = LinearIssue {
+            identifier: "ENG-904".to_string(),
+            title: "Feature V".to_string(),
+            url: "https://linear.app/team/issue/ENG-904/feature-v".to_string(),
+            state_type: "started".to_string(),
+            priority: None,
+            github_pr_urls: vec![pr_url.to_string()],
+        };
+
+        // A GitHub-only task exists for the PR
+        let mut github_task = make_task(1, "Feature V", TaskStatus::InProgress);
+        github_task.github_pr_contexts = vec![make_github_ctx(pr_url, "open")];
+
+        // A Linear-linked task also exists for this issue
+        let mut linear_task = make_task(2, "Feature V", TaskStatus::InProgress);
+        linear_task.linear_contexts = vec![make_linear_ctx("ENG-904", "started")];
+
+        let actions = reconcile_linear(&[issue], &[github_task, linear_task]);
+        // Issue is already linked to task 2, so no CreateTaskWithLinear.
+        // Task 2 doesn't have the PR linked yet, so we get LinkGithubPrToExistingTask.
+        assert_eq!(
+            actions,
+            vec![SyncAction::LinkGithubPrToExistingTask {
+                task_id: 2,
+                pr_url: pr_url.to_string(),
+            }]
+        );
     }
 }
