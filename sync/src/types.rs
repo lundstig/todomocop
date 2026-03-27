@@ -43,6 +43,7 @@ pub enum SyncAction {
         linear: CreateLinearLink,
         status: TaskStatus,
         priority: Option<i64>,
+        github_pr_urls: Vec<String>,
     },
     MarkDone {
         task_id: i64,

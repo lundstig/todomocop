@@ -178,6 +178,7 @@ pub fn reconcile_linear(issues: &[LinearIssue], existing: &[Task]) -> Vec<SyncAc
                 },
                 status,
                 priority: issue.priority,
+                github_pr_urls: issue.github_pr_urls.clone(),
             });
         }
     }
