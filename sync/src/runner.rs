@@ -90,6 +90,14 @@ fn apply_one(db: &Db, action: &SyncAction) -> Result<ActionKind> {
             })?;
             Ok(ActionKind::Updated)
         }
+        SyncAction::LinkLinearToExistingTask { task_id, linear } => {
+            db.link_linear(*task_id, &linear.url)?;
+            Ok(ActionKind::Updated)
+        }
+        SyncAction::LinkGithubPrToExistingTask { task_id, pr_url } => {
+            db.link_github_pr(*task_id, pr_url)?;
+            Ok(ActionKind::Updated)
+        }
     }
 }
 

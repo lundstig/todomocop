@@ -15,7 +15,7 @@ impl<'a> LinearClient<'a> {
     }
 
     pub fn fetch_assigned_issues(&self) -> Result<Vec<LinearIssue>> {
-        let query = r#"{ "query": "{ viewer { assignedIssues(filter: { state: { type: { nin: [\"triage\", \"completed\", \"canceled\"] } } } first: 100) { nodes { id identifier title url state { name type } priority priorityLabel } } } }" }"#;
+        let query = r#"{ "query": "{ viewer { assignedIssues(filter: { state: { type: { nin: [\"triage\", \"completed\", \"canceled\"] } } } first: 100) { nodes { id identifier title url state { name type } priority priorityLabel attachments(filter: { sourceType: { eq: \"github\" } }) { nodes { url } } } } } }" }"#;
 
         let headers = [
             ("Authorization", self.api_key.as_str()),
@@ -48,11 +48,21 @@ fn parse_issue(node: &Value) -> Option<LinearIssue> {
     let state_type = node["state"]["type"].as_str()?.to_string();
     let priority = node["priority"].as_i64();
 
+    let github_pr_urls: Vec<String> = node["attachments"]["nodes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| a["url"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
     Some(LinearIssue {
         identifier,
         title,
         url,
         state_type,
         priority,
+        github_pr_urls,
     })
 }

@@ -28,6 +28,7 @@ pub struct LinearIssue {
     pub url: String,
     pub state_type: String,
     pub priority: Option<i64>,
+    pub github_pr_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +53,14 @@ pub enum SyncAction {
     UpdateStatus {
         task_id: i64,
         status: TaskStatus,
+    },
+    LinkLinearToExistingTask {
+        task_id: i64,
+        linear: CreateLinearLink,
+    },
+    LinkGithubPrToExistingTask {
+        task_id: i64,
+        pr_url: String,
     },
 }
 

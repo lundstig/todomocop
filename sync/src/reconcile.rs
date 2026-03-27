@@ -502,6 +502,7 @@ mod tests {
             url: "https://linear.app/team/issue/ENG-200/build-sync".to_string(),
             state_type: "started".to_string(),
             priority: Some(2),
+            github_pr_urls: vec![],
         };
 
         let actions = reconcile_linear(&[issue], &[]);
@@ -529,6 +530,7 @@ mod tests {
             url: "https://linear.app/team/issue/ENG-201/build-sync".to_string(),
             state_type: "started".to_string(),
             priority: None,
+            github_pr_urls: vec![],
         };
 
         let mut task = make_task(1, "Build sync", TaskStatus::Ready);
@@ -553,6 +555,7 @@ mod tests {
                 url: "https://linear.app/team/issue/ENG-300/part-1".to_string(),
                 state_type: "completed".to_string(),
                 priority: None,
+                github_pr_urls: vec![],
             },
             LinearIssue {
                 identifier: "ENG-301".to_string(),
@@ -560,6 +563,7 @@ mod tests {
                 url: "https://linear.app/team/issue/ENG-301/part-2".to_string(),
                 state_type: "completed".to_string(),
                 priority: None,
+                github_pr_urls: vec![],
             },
         ];
 
@@ -583,6 +587,7 @@ mod tests {
                 url: "https://linear.app/team/issue/ENG-400/part-1".to_string(),
                 state_type: "completed".to_string(),
                 priority: None,
+                github_pr_urls: vec![],
             },
             LinearIssue {
                 identifier: "ENG-401".to_string(),
@@ -590,6 +595,7 @@ mod tests {
                 url: "https://linear.app/team/issue/ENG-401/part-2".to_string(),
                 state_type: "started".to_string(),
                 priority: None,
+                github_pr_urls: vec![],
             },
         ];
 
@@ -613,6 +619,7 @@ mod tests {
                 url: "https://linear.app/team/issue/ENG-500/part-1".to_string(),
                 state_type: "completed".to_string(),
                 priority: None,
+                github_pr_urls: vec![],
             },
             LinearIssue {
                 identifier: "ENG-501".to_string(),
@@ -620,6 +627,7 @@ mod tests {
                 url: "https://linear.app/team/issue/ENG-501/part-2".to_string(),
                 state_type: "canceled".to_string(),
                 priority: None,
+                github_pr_urls: vec![],
             },
         ];
 
@@ -642,6 +650,7 @@ mod tests {
                 url: "https://linear.app/team/issue/ENG-600/part-1".to_string(),
                 state_type: "canceled".to_string(),
                 priority: None,
+                github_pr_urls: vec![],
             },
             LinearIssue {
                 identifier: "ENG-601".to_string(),
@@ -649,6 +658,7 @@ mod tests {
                 url: "https://linear.app/team/issue/ENG-601/part-2".to_string(),
                 state_type: "canceled".to_string(),
                 priority: None,
+                github_pr_urls: vec![],
             },
         ];
 
@@ -682,6 +692,7 @@ mod tests {
             url: "https://linear.app/team/issue/ENG-800/done-thing".to_string(),
             state_type: "started".to_string(),
             priority: None,
+            github_pr_urls: vec![],
         };
 
         let mut task = make_task(1, "Done thing", TaskStatus::Done);
