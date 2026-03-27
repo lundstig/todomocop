@@ -288,29 +288,32 @@ fn main() -> Result<()> {
             let do_github = source.is_none() || matches!(source, Some(SyncSource::Github));
             let do_linear = source.is_none() || matches!(source, Some(SyncSource::Linear));
 
-            let existing = db.list_tasks(TaskFilter::default())?;
-            let mut all_actions = Vec::new();
+            let mut total_summary = todomocop_sync::runner::SyncSummary::default();
 
             if do_github {
+                let existing = db.list_tasks(TaskFilter::default())?;
                 let token = std::env::var("GITHUB_TOKEN")
                     .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN not set"))?;
                 let github = todomocop_sync::github::GithubClient::new(http.as_ref(), token)?;
                 let prs = github.fetch_prs(since_days)?;
                 let actions = todomocop_sync::reconcile::reconcile_github(&prs, &existing, github.username());
-                all_actions.extend(actions);
+                let summary = todomocop_sync::runner::apply_actions(&db, &actions);
+                total_summary.merge(&summary);
             }
 
             if do_linear {
+                // Re-read tasks after GitHub sync so dedup sees newly created tasks
+                let existing = db.list_tasks(TaskFilter::default())?;
                 let api_key = std::env::var("LINEAR_API_KEY")
                     .map_err(|_| anyhow::anyhow!("LINEAR_API_KEY not set"))?;
                 let linear = todomocop_sync::linear::LinearClient::new(http.as_ref(), api_key);
                 let issues = linear.fetch_assigned_issues()?;
                 let actions = todomocop_sync::reconcile::reconcile_linear(&issues, &existing);
-                all_actions.extend(actions);
+                let summary = todomocop_sync::runner::apply_actions(&db, &actions);
+                total_summary.merge(&summary);
             }
 
-            let summary = todomocop_sync::runner::apply_actions(&db, &all_actions);
-            println!("{summary}");
+            println!("{total_summary}");
         }
     }
 

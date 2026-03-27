@@ -23,6 +23,16 @@ impl std::fmt::Display for SyncSummary {
     }
 }
 
+impl SyncSummary {
+    pub fn merge(&mut self, other: &SyncSummary) {
+        self.created += other.created;
+        self.completed += other.completed;
+        self.canceled += other.canceled;
+        self.updated += other.updated;
+        self.errors.extend(other.errors.iter().cloned());
+    }
+}
+
 pub fn apply_actions(db: &Db, actions: &[SyncAction]) -> SyncSummary {
     let mut summary = SyncSummary::default();
     for action in actions {
