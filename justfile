@@ -1,3 +1,6 @@
+default:
+    just --list
+
 # Build release binaries
 build:
     cargo build --release -p todomocop-cli -p todomocop-mcp

@@ -5,17 +5,25 @@ use crate::types::SyncAction;
 
 #[derive(Debug, Default)]
 pub struct SyncSummary {
-    pub created: u32,
-    pub completed: u32,
-    pub canceled: u32,
-    pub updated: u32,
+    pub created: Vec<String>,
+    pub completed: Vec<String>,
+    pub canceled: Vec<String>,
+    pub updated: Vec<String>,
+    pub linked: Vec<String>,
     pub errors: Vec<String>,
 }
 
 impl std::fmt::Display for SyncSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Created {}, completed {}, canceled {}, updated {}",
-            self.created, self.completed, self.canceled, self.updated)?;
+        write!(
+            f,
+            "Created {}, completed {}, canceled {}, updated {}, linked {}",
+            self.created.len(),
+            self.completed.len(),
+            self.canceled.len(),
+            self.updated.len(),
+            self.linked.len(),
+        )?;
         if !self.errors.is_empty() {
             write!(f, " ({} errors)", self.errors.len())?;
         }
@@ -25,11 +33,20 @@ impl std::fmt::Display for SyncSummary {
 
 impl SyncSummary {
     pub fn merge(&mut self, other: &SyncSummary) {
-        self.created += other.created;
-        self.completed += other.completed;
-        self.canceled += other.canceled;
-        self.updated += other.updated;
+        self.created.extend(other.created.iter().cloned());
+        self.completed.extend(other.completed.iter().cloned());
+        self.canceled.extend(other.canceled.iter().cloned());
+        self.updated.extend(other.updated.iter().cloned());
+        self.linked.extend(other.linked.iter().cloned());
         self.errors.extend(other.errors.iter().cloned());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.created.is_empty()
+            && self.completed.is_empty()
+            && self.canceled.is_empty()
+            && self.updated.is_empty()
+            && self.linked.is_empty()
     }
 }
 
@@ -37,11 +54,12 @@ pub fn apply_actions(db: &Db, actions: &[SyncAction]) -> SyncSummary {
     let mut summary = SyncSummary::default();
     for action in actions {
         match apply_one(db, action) {
-            Ok(kind) => match kind {
-                ActionKind::Created => summary.created += 1,
-                ActionKind::Completed => summary.completed += 1,
-                ActionKind::Canceled => summary.canceled += 1,
-                ActionKind::Updated => summary.updated += 1,
+            Ok((kind, desc)) => match kind {
+                ActionKind::Created => summary.created.push(desc),
+                ActionKind::Completed => summary.completed.push(desc),
+                ActionKind::Canceled => summary.canceled.push(desc),
+                ActionKind::Updated => summary.updated.push(desc),
+                ActionKind::Linked => summary.linked.push(desc),
             },
             Err(e) => summary.errors.push(format!("{e:#}")),
         }
@@ -49,9 +67,17 @@ pub fn apply_actions(db: &Db, actions: &[SyncAction]) -> SyncSummary {
     summary
 }
 
-enum ActionKind { Created, Completed, Canceled, Updated }
+enum ActionKind { Created, Completed, Canceled, Updated, Linked }
 
-fn apply_one(db: &Db, action: &SyncAction) -> Result<ActionKind> {
+fn task_title(db: &Db, task_id: i64) -> String {
+    db.get_task(task_id)
+        .ok()
+        .flatten()
+        .map(|t| t.title)
+        .unwrap_or_else(|| format!("#{task_id}"))
+}
+
+fn apply_one(db: &Db, action: &SyncAction) -> Result<(ActionKind, String)> {
     match action {
         SyncAction::CreateTaskWithGithub { title, pr, status } => {
             let task_id = db.add_task(AddTask {
@@ -64,7 +90,7 @@ fn apply_one(db: &Db, action: &SyncAction) -> Result<ActionKind> {
                 planned_date: None,
             })?;
             db.link_github_pr(task_id, &pr.url)?;
-            Ok(ActionKind::Created)
+            Ok((ActionKind::Created, format!("#{task_id} {title}")))
         }
         SyncAction::CreateTaskWithLinear { title, linear, status, priority, github_pr_urls } => {
             let task_id = db.add_task(AddTask {
@@ -80,36 +106,41 @@ fn apply_one(db: &Db, action: &SyncAction) -> Result<ActionKind> {
             for pr_url in github_pr_urls {
                 db.link_github_pr(task_id, pr_url)?;
             }
-            Ok(ActionKind::Created)
+            Ok((ActionKind::Created, format!("#{task_id} {title}")))
         }
         SyncAction::MarkDone { task_id } => {
+            let title = task_title(db, *task_id);
             db.edit_task(*task_id, EditTask {
                 status: Some(TaskStatus::Done),
                 ..Default::default()
             })?;
-            Ok(ActionKind::Completed)
+            Ok((ActionKind::Completed, format!("#{task_id} {title}")))
         }
         SyncAction::MarkCanceled { task_id } => {
+            let title = task_title(db, *task_id);
             db.edit_task(*task_id, EditTask {
                 status: Some(TaskStatus::Canceled),
                 ..Default::default()
             })?;
-            Ok(ActionKind::Canceled)
+            Ok((ActionKind::Canceled, format!("#{task_id} {title}")))
         }
         SyncAction::UpdateStatus { task_id, status } => {
+            let title = task_title(db, *task_id);
             db.edit_task(*task_id, EditTask {
                 status: Some(*status),
                 ..Default::default()
             })?;
-            Ok(ActionKind::Updated)
+            Ok((ActionKind::Updated, format!("#{task_id} {title} → {status}")))
         }
         SyncAction::LinkLinearToExistingTask { task_id, linear } => {
+            let title = task_title(db, *task_id);
             db.link_linear(*task_id, &linear.url)?;
-            Ok(ActionKind::Updated)
+            Ok((ActionKind::Linked, format!("#{task_id} {title} ← {}", linear.identifier)))
         }
         SyncAction::LinkGithubPrToExistingTask { task_id, pr_url } => {
+            let title = task_title(db, *task_id);
             db.link_github_pr(*task_id, pr_url)?;
-            Ok(ActionKind::Updated)
+            Ok((ActionKind::Linked, format!("#{task_id} {title} ← {pr_url}")))
         }
     }
 }
@@ -142,7 +173,7 @@ mod tests {
         }];
 
         let summary = apply_actions(&db, &actions);
-        assert_eq!(summary.created, 1);
+        assert_eq!(summary.created.len(), 1);
         assert!(summary.errors.is_empty());
 
         // Verify task exists
@@ -155,7 +186,7 @@ mod tests {
         // 2. Mark it done
         let done_actions = vec![SyncAction::MarkDone { task_id: tasks[0].id }];
         let summary = apply_actions(&db, &done_actions);
-        assert_eq!(summary.completed, 1);
+        assert_eq!(summary.completed.len(), 1);
 
         let task = db.get_task(tasks[0].id).unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Done);
@@ -179,7 +210,7 @@ mod tests {
         }];
 
         let summary = apply_actions(&db, &actions);
-        assert_eq!(summary.created, 1);
+        assert_eq!(summary.created.len(), 1);
         assert!(summary.errors.is_empty());
 
         let tasks = db.list_tasks(TaskFilter::default()).unwrap();
@@ -190,7 +221,7 @@ mod tests {
         // Cancel it (issue unassigned)
         let cancel_actions = vec![SyncAction::MarkCanceled { task_id: tasks[0].id }];
         let summary = apply_actions(&db, &cancel_actions);
-        assert_eq!(summary.canceled, 1);
+        assert_eq!(summary.canceled.len(), 1);
 
         let task = db.get_task(tasks[0].id).unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Canceled);
@@ -223,7 +254,7 @@ mod tests {
             status: TaskStatus::Working,
         }];
         let summary = apply_actions(&db, &update_actions);
-        assert_eq!(summary.updated, 1);
+        assert_eq!(summary.updated.len(), 1);
 
         let task = db.get_task(tasks[0].id).unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Working);
@@ -252,8 +283,8 @@ mod tests {
         ];
 
         let summary = apply_actions(&db, &actions);
-        assert_eq!(summary.errors.len(), 1); // first action failed
-        assert_eq!(summary.created, 1); // second action succeeded
+        assert_eq!(summary.errors.len(), 1usize); // first action failed
+        assert_eq!(summary.created.len(), 1); // second action succeeded
     }
 
     #[test]
@@ -290,7 +321,7 @@ mod tests {
             },
         }];
         let summary = apply_actions(&db, &link);
-        assert_eq!(summary.updated, 1);
+        assert_eq!(summary.linked.len(), 1);
         assert!(summary.errors.is_empty());
 
         // Verify task now has both contexts
@@ -328,7 +359,7 @@ mod tests {
             pr_url: "https://github.com/o/r/pull/60".into(),
         }];
         let summary = apply_actions(&db, &link);
-        assert_eq!(summary.updated, 1);
+        assert_eq!(summary.linked.len(), 1);
         assert!(summary.errors.is_empty());
 
         // Verify task now has both contexts

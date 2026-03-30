@@ -289,6 +289,31 @@ fn print_tasks(tasks: &[Task], pretty: bool) {
     }
 }
 
+fn print_sync_section(icon: &str, label: colored::ColoredString, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    println!("  {} {} ({})", icon, label, items.len());
+    for item in items {
+        println!("    {}", item.dimmed());
+    }
+}
+
+fn print_sync_summary(summary: &todomocop_sync::runner::SyncSummary) {
+    if summary.is_empty() && summary.errors.is_empty() {
+        println!("{}", "Already up to date.".dimmed());
+        return;
+    }
+    print_sync_section("+", "created".green(), &summary.created);
+    print_sync_section("✓", "completed".blue(), &summary.completed);
+    print_sync_section("✗", "canceled".yellow(), &summary.canceled);
+    print_sync_section("~", "updated".cyan(), &summary.updated);
+    print_sync_section("⇄", "linked".dimmed(), &summary.linked);
+    if !summary.errors.is_empty() {
+        print_sync_section("!", "errors".red(), &summary.errors);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -414,9 +439,26 @@ fn main() -> Result<()> {
             let do_github = source.is_none() || matches!(source, Some(SyncSource::Github));
             let do_linear = source.is_none() || matches!(source, Some(SyncSource::Linear));
 
+            let spinner = |msg: &'static str| -> Option<indicatif::ProgressBar> {
+                if !pretty {
+                    return None;
+                }
+                let sp = indicatif::ProgressBar::new_spinner();
+                sp.set_style(
+                    indicatif::ProgressStyle::default_spinner()
+                        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+                        .template("{spinner} {msg}")
+                        .unwrap(),
+                );
+                sp.enable_steady_tick(std::time::Duration::from_millis(80));
+                sp.set_message(msg);
+                Some(sp)
+            };
+
             let mut total_summary = todomocop_sync::runner::SyncSummary::default();
 
             if do_github {
+                let sp = spinner("Syncing GitHub PRs…");
                 let existing = db.list_tasks(TaskFilter::default())?;
                 let token = std::env::var("GITHUB_TOKEN")
                     .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN not set"))?;
@@ -425,9 +467,13 @@ fn main() -> Result<()> {
                 let actions = todomocop_sync::reconcile::reconcile_github(&prs, &existing, github.username());
                 let summary = todomocop_sync::runner::apply_actions(&db, &actions);
                 total_summary.merge(&summary);
+                if let Some(sp) = sp {
+                    sp.finish_and_clear();
+                }
             }
 
             if do_linear {
+                let sp = spinner("Syncing Linear issues…");
                 // Re-read tasks after GitHub sync so dedup sees newly created tasks
                 let existing = db.list_tasks(TaskFilter::default())?;
                 let api_key = std::env::var("LINEAR_API_KEY")
@@ -437,9 +483,16 @@ fn main() -> Result<()> {
                 let actions = todomocop_sync::reconcile::reconcile_linear(&issues, &existing);
                 let summary = todomocop_sync::runner::apply_actions(&db, &actions);
                 total_summary.merge(&summary);
+                if let Some(sp) = sp {
+                    sp.finish_and_clear();
+                }
             }
 
-            println!("{total_summary}");
+            if pretty {
+                print_sync_summary(&total_summary);
+            } else {
+                println!("{total_summary}");
+            }
         }
     }
 
