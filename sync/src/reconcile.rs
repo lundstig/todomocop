@@ -164,7 +164,7 @@ pub fn reconcile_linear(issues: &[LinearIssue], existing: &[Task]) -> Vec<SyncAc
             });
         } else {
             let status = if issue.state_type == "started" {
-                TaskStatus::InProgress
+                TaskStatus::Working
             } else {
                 TaskStatus::Ready
             };
@@ -235,10 +235,10 @@ pub fn reconcile_linear(issues: &[LinearIssue], existing: &[Task]) -> Vec<SyncAc
             } else {
                 actions.push(SyncAction::MarkCanceled { task_id: task.id });
             }
-        } else if any_started && task.status != TaskStatus::InProgress {
+        } else if any_started && task.status != TaskStatus::Working {
             actions.push(SyncAction::UpdateStatus {
                 task_id: task.id,
-                status: TaskStatus::InProgress,
+                status: TaskStatus::Working,
             });
         }
 
@@ -426,7 +426,7 @@ mod tests {
             ME,
         );
 
-        let mut task = make_task(1, "Add feature", TaskStatus::InProgress);
+        let mut task = make_task(1, "Add feature", TaskStatus::Working);
         task.github_pr_contexts = vec![make_github_ctx(
             "https://github.com/owner/repo/pull/5",
             "merged",
@@ -445,7 +445,7 @@ mod tests {
             ME,
         );
 
-        let mut task = make_task(1, "Add feature", TaskStatus::InProgress);
+        let mut task = make_task(1, "Add feature", TaskStatus::Working);
         task.github_pr_contexts = vec![make_github_ctx(
             "https://github.com/owner/repo/pull/6",
             "merged",
@@ -465,7 +465,7 @@ mod tests {
             ME,
         );
 
-        let mut task = make_task(1, "Add feature", TaskStatus::InProgress);
+        let mut task = make_task(1, "Add feature", TaskStatus::Working);
         task.github_pr_contexts = vec![make_github_ctx(
             "https://github.com/owner/repo/pull/7",
             "closed",
@@ -490,7 +490,7 @@ mod tests {
             ME,
         );
 
-        let mut task = make_task(1, "Big feature", TaskStatus::InProgress);
+        let mut task = make_task(1, "Big feature", TaskStatus::Working);
         task.github_pr_contexts = vec![
             make_github_ctx("https://github.com/owner/repo/pull/8", "merged"),
             make_github_ctx("https://github.com/owner/repo/pull/9", "open"),
@@ -515,7 +515,7 @@ mod tests {
             ME,
         );
 
-        let mut task = make_task(1, "Big feature", TaskStatus::InProgress);
+        let mut task = make_task(1, "Big feature", TaskStatus::Working);
         task.github_pr_contexts = vec![
             make_github_ctx("https://github.com/owner/repo/pull/10", "merged"),
             make_github_ctx("https://github.com/owner/repo/pull/11", "closed"),
@@ -561,7 +561,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(title, "Build sync");
-                assert_eq!(*status, TaskStatus::InProgress);
+                assert_eq!(*status, TaskStatus::Working);
                 assert_eq!(*priority, Some(2));
             }
             other => panic!("expected CreateTaskWithLinear, got {other:?}"),
@@ -587,7 +587,7 @@ mod tests {
             actions,
             vec![SyncAction::UpdateStatus {
                 task_id: 1,
-                status: TaskStatus::InProgress,
+                status: TaskStatus::Working,
             }]
         );
     }
@@ -613,7 +613,7 @@ mod tests {
             },
         ];
 
-        let mut task = make_task(1, "Big project", TaskStatus::InProgress);
+        let mut task = make_task(1, "Big project", TaskStatus::Working);
         task.linear_contexts = vec![
             make_linear_ctx("ENG-300", "started"),
             make_linear_ctx("ENG-301", "started"),
@@ -645,7 +645,7 @@ mod tests {
             },
         ];
 
-        let mut task = make_task(1, "Big project", TaskStatus::InProgress);
+        let mut task = make_task(1, "Big project", TaskStatus::Working);
         task.linear_contexts = vec![
             make_linear_ctx("ENG-400", "started"),
             make_linear_ctx("ENG-401", "started"),
@@ -677,7 +677,7 @@ mod tests {
             },
         ];
 
-        let mut task = make_task(1, "Big project", TaskStatus::InProgress);
+        let mut task = make_task(1, "Big project", TaskStatus::Working);
         task.linear_contexts = vec![
             make_linear_ctx("ENG-500", "started"),
             make_linear_ctx("ENG-501", "started"),
@@ -708,7 +708,7 @@ mod tests {
             },
         ];
 
-        let mut task = make_task(1, "Doomed project", TaskStatus::InProgress);
+        let mut task = make_task(1, "Doomed project", TaskStatus::Working);
         task.linear_contexts = vec![
             make_linear_ctx("ENG-600", "started"),
             make_linear_ctx("ENG-601", "started"),
@@ -723,7 +723,7 @@ mod tests {
         // Issue is gone from the results (unassigned from user)
         let issues: Vec<LinearIssue> = vec![];
 
-        let mut task = make_task(1, "Was assigned", TaskStatus::InProgress);
+        let mut task = make_task(1, "Was assigned", TaskStatus::Working);
         task.linear_contexts = vec![make_linear_ctx("ENG-700", "started")];
 
         let actions = reconcile_linear(&issues, &[task]);
@@ -764,7 +764,7 @@ mod tests {
         };
 
         // Existing task linked to that PR but not to Linear
-        let mut task = make_task(1, "Feature X", TaskStatus::InProgress);
+        let mut task = make_task(1, "Feature X", TaskStatus::Working);
         task.github_pr_contexts = vec![make_github_ctx(pr_url, "open")];
 
         let actions = reconcile_linear(&[issue], &[task]);
@@ -814,7 +814,7 @@ mod tests {
         };
 
         // Task already linked to Linear, but no GitHub PR context
-        let mut task = make_task(1, "Feature Z", TaskStatus::InProgress);
+        let mut task = make_task(1, "Feature Z", TaskStatus::Working);
         task.linear_contexts = vec![make_linear_ctx("ENG-902", "started")];
 
         let actions = reconcile_linear(&[issue], &[task]);
@@ -840,7 +840,7 @@ mod tests {
         };
 
         // Task has both Linear and the same GitHub PR linked
-        let mut task = make_task(1, "Feature W", TaskStatus::InProgress);
+        let mut task = make_task(1, "Feature W", TaskStatus::Working);
         task.linear_contexts = vec![make_linear_ctx("ENG-903", "started")];
         task.github_pr_contexts = vec![make_github_ctx(pr_url, "open")];
 
@@ -862,11 +862,11 @@ mod tests {
         };
 
         // A GitHub-only task exists for the PR
-        let mut github_task = make_task(1, "Feature V", TaskStatus::InProgress);
+        let mut github_task = make_task(1, "Feature V", TaskStatus::Working);
         github_task.github_pr_contexts = vec![make_github_ctx(pr_url, "open")];
 
         // A Linear-linked task also exists for this issue
-        let mut linear_task = make_task(2, "Feature V", TaskStatus::InProgress);
+        let mut linear_task = make_task(2, "Feature V", TaskStatus::Working);
         linear_task.linear_contexts = vec![make_linear_ctx("ENG-904", "started")];
 
         let actions = reconcile_linear(&[issue], &[github_task, linear_task]);

@@ -413,7 +413,7 @@ mod tests {
         let id7 = db.add_task(AddTask {
             title: "Critical bug".into(),
             description: Some("Fix the critical production bug".into()),
-            status: Some(TaskStatus::InProgress),
+            status: Some(TaskStatus::Working),
             priority: Some(0),
             workspace: "work".into(),
             deadline: Some("2026-03-25".into()),

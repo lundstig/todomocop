@@ -164,7 +164,7 @@ fn status_label(status: TaskStatus) -> &'static str {
     match status {
         TaskStatus::Idea => "idea",
         TaskStatus::Ready => "ready",
-        TaskStatus::InProgress => "working",
+        TaskStatus::Working => "working",
         TaskStatus::Done => "done",
         TaskStatus::Canceled => "cancel",
     }
@@ -175,7 +175,7 @@ fn status_colored(status: TaskStatus) -> colored::ColoredString {
     match status {
         TaskStatus::Idea => label.dimmed(),
         TaskStatus::Ready => label.blue(),
-        TaskStatus::InProgress => label.green(),
+        TaskStatus::Working => label.green(),
         TaskStatus::Done => label.bright_black(),
         TaskStatus::Canceled => label.bright_black().strikethrough(),
     }

@@ -173,7 +173,7 @@ mod tests {
                 url: "https://linear.app/team/issue/ENG-42/build-feature".into(),
                 state_type: "started".into(),
             },
-            status: TaskStatus::InProgress,
+            status: TaskStatus::Working,
             priority: Some(2),
             github_pr_urls: Vec::new(),
         }];
@@ -184,7 +184,7 @@ mod tests {
 
         let tasks = db.list_tasks(TaskFilter::default()).unwrap();
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].status, TaskStatus::InProgress);
+        assert_eq!(tasks[0].status, TaskStatus::Working);
         assert_eq!(tasks[0].priority, Some(2));
 
         // Cancel it (issue unassigned)
@@ -220,13 +220,13 @@ mod tests {
         // Update status to in_progress
         let update_actions = vec![SyncAction::UpdateStatus {
             task_id: tasks[0].id,
-            status: TaskStatus::InProgress,
+            status: TaskStatus::Working,
         }];
         let summary = apply_actions(&db, &update_actions);
         assert_eq!(summary.updated, 1);
 
         let task = db.get_task(tasks[0].id).unwrap().unwrap();
-        assert_eq!(task.status, TaskStatus::InProgress);
+        assert_eq!(task.status, TaskStatus::Working);
     }
 
     #[test]
@@ -312,7 +312,7 @@ mod tests {
                 url: "https://linear.app/t/issue/ENG-60/build-feature".into(),
                 state_type: "started".into(),
             },
-            status: TaskStatus::InProgress,
+            status: TaskStatus::Working,
             priority: None,
             github_pr_urls: Vec::new(),
         }];

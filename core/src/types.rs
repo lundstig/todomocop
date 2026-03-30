@@ -12,7 +12,7 @@ pub type AttachmentId = i64;
 pub enum TaskStatus {
     Idea,
     Ready,
-    InProgress,
+    Working,
     Done,
     Canceled,
 }
@@ -22,7 +22,7 @@ impl fmt::Display for TaskStatus {
         match self {
             TaskStatus::Idea => write!(f, "idea"),
             TaskStatus::Ready => write!(f, "ready"),
-            TaskStatus::InProgress => write!(f, "in_progress"),
+            TaskStatus::Working => write!(f, "working"),
             TaskStatus::Done => write!(f, "done"),
             TaskStatus::Canceled => write!(f, "canceled"),
         }
@@ -36,7 +36,7 @@ impl FromStr for TaskStatus {
         match s {
             "idea" => Ok(TaskStatus::Idea),
             "ready" => Ok(TaskStatus::Ready),
-            "in_progress" => Ok(TaskStatus::InProgress),
+            "working" => Ok(TaskStatus::Working),
             "done" => Ok(TaskStatus::Done),
             "canceled" => Ok(TaskStatus::Canceled),
             other => Err(anyhow::anyhow!("unknown task status: {other}")),
