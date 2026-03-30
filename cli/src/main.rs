@@ -1,10 +1,13 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
+use colored::Colorize;
 use todomocop_core::http::{HttpClient, IntegrationConfig};
-use todomocop_core::types::{AddTask, EditTask, TaskFilter, TaskStatus};
+use todomocop_core::types::{AddTask, EditTask, Task, TaskFilter, TaskStatus};
 use todomocop_core::Db;
 
 // ---------------------------------------------------------------------------
@@ -44,6 +47,9 @@ impl HttpClient for UreqHttpClient {
 struct Cli {
     #[arg(long, env = "TODOMOCOP_DB")]
     db: Option<PathBuf>,
+    /// Disable colors and formatting (auto-detected when piped)
+    #[arg(long, global = true)]
+    plain: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -145,10 +151,141 @@ fn parse_duration_days(s: &str) -> anyhow::Result<u64> {
     }
 }
 
-fn format_task_line(task: &todomocop_core::types::Task) -> String {
+fn format_task_plain(task: &Task) -> String {
     match task.priority {
         Some(p) => format!("#{} [{}] P{} {}", task.id, task.status, p, task.title),
         None => format!("#{} [{}] {}", task.id, task.status, task.title),
+    }
+}
+
+const STATUS_WIDTH: usize = "working".len(); // widest display label
+
+fn status_label(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Idea => "idea",
+        TaskStatus::Ready => "ready",
+        TaskStatus::InProgress => "working",
+        TaskStatus::Done => "done",
+        TaskStatus::Canceled => "cancel",
+    }
+}
+
+fn status_colored(status: TaskStatus) -> colored::ColoredString {
+    let label = format!("{:<w$}", status_label(status), w = STATUS_WIDTH);
+    match status {
+        TaskStatus::Idea => label.dimmed(),
+        TaskStatus::Ready => label.blue(),
+        TaskStatus::InProgress => label.green(),
+        TaskStatus::Done => label.bright_black(),
+        TaskStatus::Canceled => label.bright_black().strikethrough(),
+    }
+}
+
+fn priority_colored(priority: Option<i64>) -> colored::ColoredString {
+    match priority {
+        Some(0) => "P0".red().bold(),
+        Some(1) => "P1".yellow(),
+        Some(2) => "P2".cyan(),
+        Some(p) => format!("P{p}").normal(),
+        None => "──".dimmed(),
+    }
+}
+
+fn truncate(s: &str, max_width: usize) -> String {
+    if s.chars().count() <= max_width {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_width.saturating_sub(1)).collect();
+        format!("{truncated}…")
+    }
+}
+
+fn format_relative_date(date: NaiveDate, today: NaiveDate) -> String {
+    let diff = (date - today).num_days();
+    match diff {
+        0 => "today".to_string(),
+        1 => "tomorrow".to_string(),
+        -1 => "yesterday".to_string(),
+        2..=6 => date.format("%a").to_string(),
+        _ => date.format("%b %-d").to_string(),
+    }
+}
+
+fn format_date_info(task: &Task, today: NaiveDate) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(ref deadline) = task.deadline {
+        if let Ok(date) = deadline.parse::<NaiveDate>() {
+            let label = format_relative_date(date, today);
+            if date < today {
+                parts.push(format!("{}", format!("⚠ {label}").red()));
+            } else if date == today {
+                parts.push(format!("{}", format!("⚠ {label}").yellow()));
+            } else {
+                parts.push(format!("📅 {}", label.dimmed()));
+            }
+        }
+    }
+
+    if let Some(ref planned) = task.planned_date {
+        if let Ok(date) = planned.parse::<NaiveDate>() {
+            let label = format_relative_date(date, today);
+            parts.push(format!("📋 {}", label.dimmed()));
+        }
+    }
+
+    parts.join("  ")
+}
+
+fn print_tasks(tasks: &[Task], pretty: bool) {
+    if tasks.is_empty() {
+        if pretty {
+            println!("{}", "No tasks found.".dimmed());
+        } else {
+            println!("No tasks found.");
+        }
+        return;
+    }
+
+    if !pretty {
+        for task in tasks {
+            println!("{}", format_task_plain(task));
+        }
+        return;
+    }
+
+    let today = chrono::Local::now().date_naive();
+    let max_id_w = tasks
+        .iter()
+        .map(|t| format!("#{}", t.id).len())
+        .max()
+        .unwrap_or(2);
+    let max_title_w = tasks
+        .iter()
+        .map(|t| t.title.chars().count())
+        .max()
+        .unwrap_or(10)
+        .min(80);
+    let max_ws_w = tasks
+        .iter()
+        .map(|t| t.workspace.len())
+        .max()
+        .unwrap_or(8);
+
+    for task in tasks {
+        let id = format!("{:>w$}", format!("#{}", task.id), w = max_id_w);
+        let status = status_colored(task.status);
+        let pri = priority_colored(task.priority);
+        let title = truncate(&task.title, max_title_w);
+        let title_padded = format!("{:<w$}", title, w = max_title_w);
+        let ws = format!("{:<w$}", task.workspace, w = max_ws_w);
+        let date = format_date_info(task, today);
+
+        print!(" {}  {}  {}  {}  {}", id.bold(), status, pri, title_padded, ws.dimmed());
+        if !date.is_empty() {
+            print!("  {date}");
+        }
+        println!();
     }
 }
 
@@ -158,6 +295,7 @@ fn format_task_line(task: &todomocop_core::types::Task) -> String {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let pretty = !cli.plain && std::io::stdout().is_terminal();
 
     let db_path = cli.db.unwrap_or_else(|| {
         dirs::data_dir()
@@ -218,13 +356,7 @@ fn main() -> Result<()> {
                 ..Default::default()
             };
             let tasks = db.list_tasks(filter)?;
-            if tasks.is_empty() {
-                println!("No tasks found.");
-            } else {
-                for task in &tasks {
-                    println!("{}", format_task_line(task));
-                }
-            }
+            print_tasks(&tasks, pretty);
         }
 
         Commands::Edit {
@@ -265,13 +397,7 @@ fn main() -> Result<()> {
                 ..Default::default()
             };
             let tasks = db.search(&query, filter)?;
-            if tasks.is_empty() {
-                println!("No tasks found.");
-            } else {
-                for task in &tasks {
-                    println!("{}", format_task_line(task));
-                }
-            }
+            print_tasks(&tasks, pretty);
         }
 
         Commands::Snooze { id, until } => {
