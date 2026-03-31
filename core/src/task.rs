@@ -243,6 +243,7 @@ impl Db {
                 let mut task = ts.into_task()?;
                 task.github_pr_contexts = self.load_github_contexts(task.id)?;
                 task.linear_contexts = self.load_linear_contexts(task.id)?;
+                task.tags = self.load_tags_for_task(task.id)?;
                 Ok(Some(task))
             }
         }
@@ -796,6 +797,30 @@ mod tests {
             let t2 = db.add_task(make_add_task("Unique test 2", "work")).unwrap();
             db.link_github_pr(t1, "https://github.com/owner/repo/pull/777").unwrap();
             assert!(db.link_github_pr(t2, "https://github.com/owner/repo/pull/777").is_err());
+        }
+
+        // --- test: list_tasks filters by tag ---
+        {
+            db.tag_task(id7, "critical-bugs").unwrap();
+            db.tag_task(id8, "critical-bugs").unwrap();
+            db.tag_task(id7, "repo:work").unwrap();
+
+            let tagged = db.list_tasks(TaskFilter {
+                tag: Some("critical-bugs".into()),
+                ..Default::default()
+            }).unwrap();
+            assert_eq!(tagged.len(), 2);
+            let ids: Vec<_> = tagged.iter().map(|t| t.id).collect();
+            assert!(ids.contains(&id7));
+            assert!(ids.contains(&id8));
+
+            // Filter by tag that only one task has
+            let tagged_work = db.list_tasks(TaskFilter {
+                tag: Some("repo:work".into()),
+                ..Default::default()
+            }).unwrap();
+            assert_eq!(tagged_work.len(), 1);
+            assert_eq!(tagged_work[0].id, id7);
         }
 
         // --- test: canceled status roundtrips ---

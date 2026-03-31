@@ -70,11 +70,17 @@ impl Db {
         for task in &mut tasks {
             task.github_pr_contexts = self.load_github_contexts(task.id)?;
             task.linear_contexts = self.load_linear_contexts(task.id)?;
+            task.tags = self.load_tags_for_task(task.id)?;
         }
 
         // Refresh stale contexts
         self.refresh_github_contexts(&mut tasks)?;
         self.refresh_linear_contexts(&mut tasks)?;
+
+        // Apply tag filter (after tags are populated)
+        if let Some(ref tag_name) = filter.tag {
+            tasks.retain(|t| t.tags.iter().any(|td| td.name == *tag_name));
+        }
 
         Ok(tasks)
     }
