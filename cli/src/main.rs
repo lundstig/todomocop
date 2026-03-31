@@ -120,6 +120,8 @@ enum Commands {
         query: String,
         #[arg(long)]
         workspace: Option<String>,
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Snooze a task until a given date
     Snooze {
@@ -492,9 +494,10 @@ fn main() -> Result<()> {
             println!("Deleted task #{id}");
         }
 
-        Commands::Search { query, workspace } => {
+        Commands::Search { query, workspace, tag } => {
             let filter = TaskFilter {
                 workspace,
+                tag,
                 ..Default::default()
             };
             let tasks = db.search(&query, filter)?;
