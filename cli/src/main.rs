@@ -72,6 +72,8 @@ enum Commands {
         planned_date: Option<String>,
         #[arg(long)]
         status: Option<String>,
+        #[arg(long)]
+        next_action: Option<String>,
     },
     /// List tasks
     List {
@@ -100,6 +102,8 @@ enum Commands {
         deadline: Option<String>,
         #[arg(long)]
         planned_date: Option<String>,
+        #[arg(long)]
+        next_action: Option<String>,
     },
     /// Delete a task
     Delete {
@@ -152,10 +156,15 @@ fn parse_duration_days(s: &str) -> anyhow::Result<u64> {
 }
 
 fn format_task_plain(task: &Task) -> String {
-    match task.priority {
-        Some(p) => format!("#{} [{}] P{} {}", task.id, task.status, p, task.title),
-        None => format!("#{} [{}] {}", task.id, task.status, task.title),
+    let mut parts = vec![format!("#{}", task.id), format!("[{}]", task.status)];
+    if let Some(p) = task.priority {
+        parts.push(format!("P{p}"));
     }
+    if let Some(ref na) = task.next_action {
+        parts.push(format!("[{na}]"));
+    }
+    parts.push(task.title.clone());
+    parts.join(" ")
 }
 
 const STATUS_WIDTH: usize = "working".len(); // widest display label
@@ -260,6 +269,11 @@ fn print_tasks(tasks: &[Task], pretty: bool) {
         .map(|t| format!("#{}", t.id).len())
         .max()
         .unwrap_or(2);
+    let max_na_w = tasks
+        .iter()
+        .map(|t| t.next_action.as_ref().map_or(0, |na| na.chars().count().min(40)))
+        .max()
+        .unwrap_or(0);
     let max_title_w = tasks
         .iter()
         .map(|t| t.title.chars().count())
@@ -281,7 +295,13 @@ fn print_tasks(tasks: &[Task], pretty: bool) {
         let ws = format!("{:<w$}", task.workspace, w = max_ws_w);
         let date = format_date_info(task, today);
 
-        print!(" {}  {}  {}  {}  {}", id.bold(), status, pri, title_padded, ws.dimmed());
+        print!(" {}  {}  {}", id.bold(), status, pri);
+        if max_na_w > 0 {
+            let na = task.next_action.as_deref().unwrap_or("");
+            let na = truncate(na, 40);
+            print!("  {:<w$}", na.dimmed(), w = max_na_w);
+        }
+        print!("  {}  {}", title_padded, ws.dimmed());
         if !date.is_empty() {
             print!("  {date}");
         }
@@ -354,6 +374,7 @@ fn main() -> Result<()> {
             deadline,
             planned_date,
             status,
+            next_action,
         } => {
             let status = status.as_deref().map(|s| s.parse::<TaskStatus>()).transpose()?;
             let id = db.add_task(AddTask {
@@ -364,6 +385,8 @@ fn main() -> Result<()> {
                 workspace,
                 deadline,
                 planned_date,
+                next_action,
+                tags: vec![],
             })?;
             println!("Created task #{id}");
         }
@@ -393,6 +416,7 @@ fn main() -> Result<()> {
             workspace,
             deadline,
             planned_date,
+            next_action,
         } => {
             let status = status.as_deref().map(|s| s.parse::<TaskStatus>()).transpose()?;
             db.edit_task(
@@ -406,6 +430,7 @@ fn main() -> Result<()> {
                     deadline: deadline.map(Some),
                     planned_date: planned_date.map(Some),
                     snooze_until: None,
+                    next_action: next_action.map(Some),
                 },
             )?;
             println!("Updated task #{id}");

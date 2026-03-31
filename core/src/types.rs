@@ -45,6 +45,19 @@ impl FromStr for TaskStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagData {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagInfo {
+    pub name: String,
+    pub description: String,
+    pub task_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddTask {
     pub title: String,
     pub description: Option<String>,
@@ -53,6 +66,9 @@ pub struct AddTask {
     pub workspace: String,
     pub deadline: Option<String>,
     pub planned_date: Option<String>,
+    pub next_action: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -69,6 +85,8 @@ pub struct EditTask {
     pub snooze_until: Option<Option<String>>,
     /// Some(None) = clear planned_date, None = don't touch
     pub planned_date: Option<Option<String>>,
+    /// Some(None) = clear next_action, None = don't touch
+    pub next_action: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,11 +100,13 @@ pub struct Task {
     pub deadline: Option<String>,
     pub snooze_until: Option<String>,
     pub planned_date: Option<String>,
+    pub next_action: Option<String>,
     pub deleted_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub github_pr_contexts: Vec<GithubPrContextData>,
     pub linear_contexts: Vec<LinearContextData>,
+    pub tags: Vec<TagData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +138,7 @@ pub struct TaskFilter {
     pub has_planned_date: Option<bool>,
     pub priority_max: Option<i64>,
     pub include_snoozed: bool,
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone)]

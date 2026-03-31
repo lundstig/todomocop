@@ -88,6 +88,8 @@ fn apply_one(db: &Db, action: &SyncAction) -> Result<(ActionKind, String)> {
                 workspace: "work".into(),
                 deadline: None,
                 planned_date: None,
+                next_action: None,
+                tags: vec![],
             })?;
             db.link_github_pr(task_id, &pr.url)?;
             Ok((ActionKind::Created, format!("#{task_id} {title}")))
@@ -101,6 +103,8 @@ fn apply_one(db: &Db, action: &SyncAction) -> Result<(ActionKind, String)> {
                 workspace: "work".into(),
                 deadline: None,
                 planned_date: None,
+                next_action: None,
+                tags: vec![],
             })?;
             db.link_linear(task_id, &linear.url)?;
             for pr_url in github_pr_urls {

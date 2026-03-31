@@ -26,6 +26,9 @@ fn format_task_compact(task: &Task) -> String {
         parts.push(format!("P{p}"));
     }
     parts.push(task.title.clone());
+    if let Some(ref na) = task.next_action {
+        parts.push(format!("next:\"{na}\""));
+    }
     parts.push(format!("({})", task.workspace));
     if let Some(ref d) = task.deadline {
         parts.push(format!("due:{d}"));
@@ -137,7 +140,7 @@ impl DbHandle {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AddTaskParams {
-    #[schemars(description = "Title of the task")]
+    #[schemars(description = "Title of the task (used for identification)")]
     title: String,
     #[schemars(description = "Description of the task")]
     description: Option<String>,
@@ -151,6 +154,8 @@ struct AddTaskParams {
     planned_date: Option<String>,
     #[schemars(description = "Status: idea, ready, working, done, or canceled")]
     status: Option<String>,
+    #[schemars(description = "Concrete next action to take on this task, e.g. 'follow up if no answer by Apr 7' or 'review PR comments'. Should always be set when creating actionable tasks.")]
+    next_action: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -171,6 +176,8 @@ struct EditTaskParams {
     deadline: Option<Option<String>>,
     #[schemars(description = "New planned date (null to clear)")]
     planned_date: Option<Option<String>>,
+    #[schemars(description = "New next action (null to clear). Update this when the task's next step changes.")]
+    next_action: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -280,7 +287,7 @@ impl TodomocopServer {
         }
     }
 
-    #[tool(description = "Add a new task")]
+    #[tool(description = "Add a new task. Always include a next_action for actionable tasks — it describes the concrete next step (e.g. 'review PR comments', 'follow up if no answer by Apr 7').")]
     fn add_task(
         &self,
         Parameters(params): Parameters<AddTaskParams>,
@@ -295,6 +302,8 @@ impl TodomocopServer {
             workspace: params.workspace.unwrap_or_else(|| "personal".into()),
             deadline: params.deadline,
             planned_date: params.planned_date,
+            next_action: params.next_action,
+            tags: vec![],
         };
 
         let result = self.db.run(move |db| {
@@ -322,6 +331,7 @@ impl TodomocopServer {
             deadline: params.deadline,
             snooze_until: None,
             planned_date: params.planned_date,
+            next_action: params.next_action,
         };
 
         let result = self.db.run(move |db| {
@@ -360,6 +370,7 @@ impl TodomocopServer {
             has_planned_date: params.has_planned_date,
             priority_max: params.priority_max,
             include_snoozed: params.include_snoozed.unwrap_or(false),
+            tag: None,
         };
 
         let result = self.db.run(move |db| {

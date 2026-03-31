@@ -19,6 +19,7 @@ pub(crate) struct TaskSelect {
     pub(crate) deadline: Option<String>,
     pub(crate) snooze_until: Option<String>,
     pub(crate) planned_date: Option<String>,
+    pub(crate) next_action: Option<String>,
     pub(crate) deleted_at: Option<String>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
@@ -41,6 +42,7 @@ impl TaskSelect {
                     deadline: &t.deadline,
                     snooze_until: &t.snooze_until,
                     planned_date: &t.planned_date,
+                    next_action: &t.next_action,
                     deleted_at: &t.deleted_at,
                     created_at: &t.created_at,
                     updated_at: &t.updated_at,
@@ -61,11 +63,13 @@ impl TaskSelect {
             deadline: self.deadline,
             snooze_until: self.snooze_until,
             planned_date: self.planned_date,
+            next_action: self.next_action,
             deleted_at: self.deleted_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
             github_pr_contexts: Vec::new(),
             linear_contexts: Vec::new(),
+            tags: Vec::new(),
         })
     }
 }
@@ -108,6 +112,7 @@ impl Db {
                 deadline: params.deadline.clone(),
                 snooze_until: None,
                 planned_date: params.planned_date.clone(),
+                next_action: params.next_action.clone(),
                 deleted_at: None,
                 created_at: now.clone(),
                 updated_at: now.clone(),
@@ -161,6 +166,9 @@ impl Db {
             }
             if let Some(p) = &params.planned_date {
                 task.planned_date = p.clone();
+            }
+            if let Some(n) = &params.next_action {
+                task.next_action = n.clone();
             }
             task.updated_at = now.clone();
 
@@ -221,6 +229,7 @@ impl Db {
                     deadline: &t.deadline,
                     snooze_until: &t.snooze_until,
                     planned_date: &t.planned_date,
+                    next_action: &t.next_action,
                     deleted_at: &t.deleted_at,
                     created_at: &t.created_at,
                     updated_at: &t.updated_at,
@@ -254,6 +263,8 @@ mod tests {
             workspace: workspace.into(),
             deadline: None,
             planned_date: None,
+            next_action: None,
+            tags: vec![],
         }
     }
 
@@ -272,6 +283,8 @@ mod tests {
                 workspace: "work".into(),
                 deadline: Some(bad.to_string()),
                 planned_date: None,
+                next_action: None,
+                tags: vec![],
             });
             assert!(err.is_err(), "deadline '{bad}' should be rejected");
 
@@ -283,6 +296,8 @@ mod tests {
                 workspace: "work".into(),
                 deadline: None,
                 planned_date: Some(bad.to_string()),
+                next_action: None,
+                tags: vec![],
             });
             assert!(err.is_err(), "planned_date '{bad}' should be rejected");
         }
@@ -296,6 +311,8 @@ mod tests {
             workspace: "work".into(),
             deadline: Some("2026-03-24".into()),
             planned_date: Some("2026-04-01".into()),
+            next_action: None,
+            tags: vec![],
         });
         assert!(id.is_ok(), "valid dates should be accepted");
 
@@ -418,6 +435,8 @@ mod tests {
             workspace: "work".into(),
             deadline: Some("2026-03-25".into()),
             planned_date: Some("2026-03-24".into()),
+            next_action: None,
+            tags: vec![],
         }).unwrap();
         assert_eq!(id7, 7);
 
@@ -430,6 +449,8 @@ mod tests {
             workspace: "work".into(),
             deadline: Some("2026-04-01".into()),
             planned_date: None,
+            next_action: None,
+            tags: vec![],
         }).unwrap();
         assert_eq!(id8, 8);
 
@@ -442,6 +463,8 @@ mod tests {
             workspace: "personal".into(),
             deadline: None,
             planned_date: Some("2026-03-30".into()),
+            next_action: None,
+            tags: vec![],
         }).unwrap();
         assert_eq!(id9, 9);
 
@@ -454,6 +477,8 @@ mod tests {
             workspace: "work".into(),
             deadline: None,
             planned_date: None,
+            next_action: None,
+            tags: vec![],
         }).unwrap();
         assert_eq!(id10, 10);
 
