@@ -74,6 +74,8 @@ enum Commands {
         status: Option<String>,
         #[arg(long)]
         next_action: Option<String>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
     },
     /// List tasks
     List {
@@ -83,6 +85,8 @@ enum Commands {
         workspace: Option<String>,
         #[arg(long)]
         include_snoozed: bool,
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Edit an existing task
     Edit {
@@ -132,6 +136,39 @@ enum Commands {
         #[arg(long, default_value = "7d")]
         since: String,
     },
+    /// Tag a task
+    Tag {
+        /// Task ID
+        id: i64,
+        /// Tag name
+        tag: String,
+    },
+    /// Remove a tag from a task
+    Untag {
+        /// Task ID
+        id: i64,
+        /// Tag name
+        tag: String,
+    },
+    /// List all tags
+    Tags {
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Edit a tag (rename or set description)
+    TagEdit {
+        /// Current tag name
+        tag: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Delete a tag
+    TagDelete {
+        /// Tag name
+        tag: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -164,6 +201,10 @@ fn format_task_plain(task: &Task) -> String {
         parts.push(format!("[{na}]"));
     }
     parts.push(task.title.clone());
+    if !task.tags.is_empty() {
+        let tag_str: Vec<&str> = task.tags.iter().map(|t| t.name.as_str()).collect();
+        parts.push(format!("[{}]", tag_str.join(", ")));
+    }
     parts.join(" ")
 }
 
@@ -305,6 +346,10 @@ fn print_tasks(tasks: &[Task], pretty: bool) {
         if !date.is_empty() {
             print!("  {date}");
         }
+        if !task.tags.is_empty() {
+            let tag_str: Vec<&str> = task.tags.iter().map(|t| t.name.as_str()).collect();
+            print!("  {}", format!("[{}]", tag_str.join(", ")).cyan());
+        }
         println!();
     }
 }
@@ -375,6 +420,7 @@ fn main() -> Result<()> {
             planned_date,
             status,
             next_action,
+            tags,
         } => {
             let status = status.as_deref().map(|s| s.parse::<TaskStatus>()).transpose()?;
             let id = db.add_task(AddTask {
@@ -386,8 +432,11 @@ fn main() -> Result<()> {
                 deadline,
                 planned_date,
                 next_action,
-                tags: vec![],
+                tags: tags.clone(),
             })?;
+            for tag in &tags {
+                db.tag_task(id, tag)?;
+            }
             println!("Created task #{id}");
         }
 
@@ -395,12 +444,14 @@ fn main() -> Result<()> {
             status,
             workspace,
             include_snoozed,
+            tag,
         } => {
             let status = status.as_deref().map(|s| s.parse::<TaskStatus>()).transpose()?;
             let filter = TaskFilter {
                 status,
                 workspace,
                 include_snoozed,
+                tag,
                 ..Default::default()
             };
             let tasks = db.list_tasks(filter)?;
@@ -518,6 +569,60 @@ fn main() -> Result<()> {
             } else {
                 println!("{total_summary}");
             }
+        }
+
+        Commands::Tag { id, tag } => {
+            db.tag_task(id, &tag)?;
+            println!("Tagged task #{id} with '{tag}'");
+        }
+
+        Commands::Untag { id, tag } => {
+            db.untag_task(id, &tag)?;
+            println!("Removed tag '{tag}' from task #{id}");
+        }
+
+        Commands::Tags { workspace } => {
+            let tags = db.list_tags(workspace.as_deref())?;
+            if tags.is_empty() {
+                if pretty {
+                    println!("{}", "No tags found.".dimmed());
+                } else {
+                    println!("No tags found.");
+                }
+            } else {
+                for tag in &tags {
+                    if pretty {
+                        let desc = if tag.description.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", format!("— {}", tag.description).dimmed())
+                        };
+                        println!(
+                            "  {}  {}{}",
+                            tag.name.bold(),
+                            format!("({} tasks)", tag.task_count).dimmed(),
+                            desc
+                        );
+                    } else {
+                        let desc = if tag.description.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" — {}", tag.description)
+                        };
+                        println!("{} ({} tasks){desc}", tag.name, tag.task_count);
+                    }
+                }
+            }
+        }
+
+        Commands::TagEdit { tag, name, description } => {
+            db.edit_tag(&tag, name.as_deref(), description.as_deref())?;
+            println!("Updated tag '{tag}'");
+        }
+
+        Commands::TagDelete { tag } => {
+            db.delete_tag(&tag)?;
+            println!("Deleted tag '{tag}'");
         }
     }
 
