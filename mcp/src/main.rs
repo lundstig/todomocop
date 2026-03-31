@@ -45,6 +45,10 @@ fn format_task_compact(task: &Task) -> String {
     for li in &task.linear_contexts {
         parts.push(format!("linear:{}({})", li.identifier, li.state_type));
     }
+    if !task.tags.is_empty() {
+        let tag_names: Vec<&str> = task.tags.iter().map(|t| t.name.as_str()).collect();
+        parts.push(format!("[{}]", tag_names.join(", ")));
+    }
     parts.join(" ")
 }
 
@@ -156,6 +160,8 @@ struct AddTaskParams {
     status: Option<String>,
     #[schemars(description = "Concrete next action to take on this task, e.g. 'follow up if no answer by Apr 7' or 'review PR comments'. Should always be set when creating actionable tasks.")]
     next_action: Option<String>,
+    #[schemars(description = "Tags to apply (auto-created if new). Convention: prefix:value (e.g. repo:tandemhealth, batch:audit-q1).")]
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -198,6 +204,8 @@ struct ListTasksParams {
     priority_max: Option<i64>,
     #[schemars(description = "Include snoozed tasks (default: false)")]
     include_snoozed: Option<bool>,
+    #[schemars(description = "Filter by tag name")]
+    tag: Option<String>,
     #[schemars(description = "Return full JSON with all fields including descriptions, timestamps, and linked PR/Linear contexts (default: false, returns compact one-line-per-task summary)")]
     verbose: Option<bool>,
 }
@@ -210,6 +218,8 @@ struct SearchParams {
     status: Option<String>,
     #[schemars(description = "Filter by workspace")]
     workspace: Option<String>,
+    #[schemars(description = "Filter by tag name")]
+    tag: Option<String>,
     #[schemars(description = "Return full JSON with all fields (default: false, returns compact summary)")]
     verbose: Option<bool>,
 }
@@ -250,6 +260,44 @@ struct LinkLinearParams {
     task_id: i64,
     #[schemars(description = "Linear issue URL (e.g. https://linear.app/team/issue/ENG-123/title)")]
     url: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct TagTaskParams {
+    #[schemars(description = "Task ID to tag")]
+    task_id: i64,
+    #[schemars(description = "Tag name. Tags are free-form strings. Convention: use prefix:value for categorization (e.g. repo:tandemhealth, batch:audit-q1, project:search-quality). Plain strings are also fine (e.g. audit, urgent). Tags are auto-created on first use.")]
+    tag: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct UntagTaskParams {
+    #[schemars(description = "Task ID to untag")]
+    task_id: i64,
+    #[schemars(description = "Tag name to remove")]
+    tag: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListTagsParams {
+    #[schemars(description = "Filter to tags that have tasks in this workspace")]
+    workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct EditTagParams {
+    #[schemars(description = "Current tag name")]
+    tag: String,
+    #[schemars(description = "New tag name (rename)")]
+    name: Option<String>,
+    #[schemars(description = "New tag description")]
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DeleteTagParams {
+    #[schemars(description = "Tag name to delete")]
+    tag: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +341,7 @@ impl TodomocopServer {
         Parameters(params): Parameters<AddTaskParams>,
     ) -> Result<CallToolResult, McpError> {
         let status = params.status.map(|s| parse_status(&s)).transpose()?;
+        let tags = params.tags.unwrap_or_default();
 
         let add = AddTask {
             title: params.title,
@@ -303,11 +352,14 @@ impl TodomocopServer {
             deadline: params.deadline,
             planned_date: params.planned_date,
             next_action: params.next_action,
-            tags: vec![],
+            tags: tags.clone(),
         };
 
         let result = self.db.run(move |db| {
             let id = db.add_task(add)?;
+            for tag in &tags {
+                db.tag_task(id, tag)?;
+            }
             Ok(format!("Created task #{id}"))
         }).map_err(to_mcp_error)?;
 
@@ -370,7 +422,7 @@ impl TodomocopServer {
             has_planned_date: params.has_planned_date,
             priority_max: params.priority_max,
             include_snoozed: params.include_snoozed.unwrap_or(false),
-            tag: None,
+            tag: params.tag,
         };
 
         let result = self.db.run(move |db| {
@@ -396,6 +448,7 @@ impl TodomocopServer {
         let filter = TaskFilter {
             status,
             workspace: params.workspace,
+            tag: params.tag,
             ..Default::default()
         };
         let query = params.query;
@@ -489,6 +542,89 @@ impl TodomocopServer {
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
+
+    #[tool(description = "Add a tag to a task. Tags are free-form strings. Convention: use prefix:value for categorization (e.g. repo:tandemhealth, batch:audit-q1, project:search-quality). Plain strings are also fine (e.g. audit, urgent). Tags are auto-created on first use — no need to create them beforehand.")]
+    fn tag_task(
+        &self,
+        Parameters(params): Parameters<TagTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let task_id = params.task_id;
+        let tag = params.tag;
+        let result = self.db.run(move |db| {
+            db.tag_task(task_id, &tag)?;
+            Ok(format!("Tagged task #{task_id} with '{tag}'"))
+        }).map_err(to_mcp_error)?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(description = "Remove a tag from a task")]
+    fn untag_task(
+        &self,
+        Parameters(params): Parameters<UntagTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let task_id = params.task_id;
+        let tag = params.tag;
+        let result = self.db.run(move |db| {
+            db.untag_task(task_id, &tag)?;
+            Ok(format!("Removed tag '{tag}' from task #{task_id}"))
+        }).map_err(to_mcp_error)?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(description = "List all tags with task counts. If workspace is given, only shows tags with tasks in that workspace.")]
+    fn list_tags(
+        &self,
+        Parameters(params): Parameters<ListTagsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let workspace = params.workspace;
+        let result = self.db.run(move |db| {
+            let tags = db.list_tags(workspace.as_deref())?;
+            if tags.is_empty() {
+                return Ok("No tags found.".to_string());
+            }
+            let lines: Vec<String> = tags
+                .iter()
+                .map(|t| {
+                    let desc = if t.description.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", t.description)
+                    };
+                    format!("{} ({} tasks){desc}", t.name, t.task_count)
+                })
+                .collect();
+            Ok(lines.join("\n"))
+        }).map_err(to_mcp_error)?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(description = "Rename a tag and/or update its description")]
+    fn edit_tag(
+        &self,
+        Parameters(params): Parameters<EditTagParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let tag = params.tag;
+        let name = params.name;
+        let description = params.description;
+        let result = self.db.run(move |db| {
+            db.edit_tag(&tag, name.as_deref(), description.as_deref())?;
+            Ok(format!("Updated tag '{tag}'"))
+        }).map_err(to_mcp_error)?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(description = "Delete a tag and remove it from all tasks")]
+    fn delete_tag(
+        &self,
+        Parameters(params): Parameters<DeleteTagParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let tag = params.tag;
+        let result = self.db.run(move |db| {
+            db.delete_tag(&tag)?;
+            Ok(format!("Deleted tag '{tag}'"))
+        }).map_err(to_mcp_error)?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -503,7 +639,8 @@ impl ServerHandler for TodomocopServer {
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
                 "Task management server. Use add_task, edit_task, delete_task, list_tasks, \
-                 search, snooze, add_attachment, link_github_pr, and link_linear to manage tasks."
+                 search, snooze, add_attachment, link_github_pr, link_linear, \
+                 tag_task, untag_task, list_tags, edit_tag, and delete_tag to manage tasks."
                     .to_string(),
             )
     }
