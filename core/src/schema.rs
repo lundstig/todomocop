@@ -1,7 +1,7 @@
 use rust_query::migration::schema;
 
 #[schema(TodoSchema)]
-#[version(0..=1)]
+#[version(0..=3)]
 pub mod vN {
     use rust_query::TableRow;
 
@@ -19,6 +19,8 @@ pub mod vN {
         pub deleted_at: Option<String>,
         pub created_at: String,
         pub updated_at: String,
+        #[version(2..)]
+        pub next_action: Option<String>,
     }
 
     pub struct Attachment {
@@ -61,7 +63,20 @@ pub mod vN {
         #[version(1..)]
         pub state_type: String,
     }
+
+    #[version(3..)]
+    pub struct Tag {
+        #[unique]
+        pub name: String,
+        pub description: String,
+    }
+
+    #[version(3..)]
+    pub struct TaskTag {
+        pub task: TableRow<Task>,
+        pub tag: TableRow<Tag>,
+    }
 }
 
-// Re-export the generated schema types from v1 so they're accessible from outside this module.
-pub use v1::*;
+// Re-export the generated schema types from v3 so they're accessible from outside this module.
+pub use v3::*;

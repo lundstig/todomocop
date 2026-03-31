@@ -4,6 +4,7 @@ pub mod http;
 pub mod linear;
 pub mod query;
 pub mod schema;
+pub mod tag;
 pub mod task;
 pub mod types;
 
@@ -38,6 +39,12 @@ impl Db {
                     state_type: String::new(),
                 }),
             })
+            .migrate(|txn| schema::v1::migrate::TodoSchema {
+                task: txn.migrate_ok(|_old| schema::v1::migrate::Task {
+                    next_action: None,
+                }),
+            })
+            .migrate(|_txn| schema::v2::migrate::TodoSchema {})
             .finish()
             .ok_or_else(|| anyhow::anyhow!("database version is newer than supported"))?;
         Ok(Db {
