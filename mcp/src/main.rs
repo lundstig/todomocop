@@ -12,8 +12,45 @@ use rmcp::{
 };
 use serde::Deserialize;
 use todomocop_core::http::{HttpClient, IntegrationConfig};
-use todomocop_core::types::{AddTask, EditTask, NewAttachment, TaskFilter, TaskStatus};
+use todomocop_core::types::{AddTask, EditTask, NewAttachment, Task, TaskFilter, TaskStatus};
 use todomocop_core::Db;
+
+// ---------------------------------------------------------------------------
+// Compact formatting (token-efficient output for LLM consumption)
+// ---------------------------------------------------------------------------
+
+fn format_task_compact(task: &Task) -> String {
+    let mut parts = vec![format!("#{}", task.id)];
+    parts.push(format!("[{}]", task.status));
+    if let Some(p) = task.priority {
+        parts.push(format!("P{p}"));
+    }
+    parts.push(task.title.clone());
+    parts.push(format!("({})", task.workspace));
+    if let Some(ref d) = task.deadline {
+        parts.push(format!("due:{d}"));
+    }
+    if let Some(ref d) = task.planned_date {
+        parts.push(format!("planned:{d}"));
+    }
+    if let Some(ref d) = task.snooze_until {
+        parts.push(format!("snoozed:{d}"));
+    }
+    for pr in &task.github_pr_contexts {
+        parts.push(format!("pr:{}#{}({})", pr.repo, pr.number, pr.state));
+    }
+    for li in &task.linear_contexts {
+        parts.push(format!("linear:{}({})", li.identifier, li.state_type));
+    }
+    parts.join(" ")
+}
+
+fn format_tasks_compact(tasks: &[Task]) -> String {
+    if tasks.is_empty() {
+        return "No tasks found.".to_string();
+    }
+    tasks.iter().map(|t| format_task_compact(t)).collect::<Vec<_>>().join("\n")
+}
 
 // ---------------------------------------------------------------------------
 // UreqHttpClient
@@ -154,6 +191,8 @@ struct ListTasksParams {
     priority_max: Option<i64>,
     #[schemars(description = "Include snoozed tasks (default: false)")]
     include_snoozed: Option<bool>,
+    #[schemars(description = "Return full JSON with all fields including descriptions, timestamps, and linked PR/Linear contexts (default: false, returns compact one-line-per-task summary)")]
+    verbose: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -164,6 +203,8 @@ struct SearchParams {
     status: Option<String>,
     #[schemars(description = "Filter by workspace")]
     workspace: Option<String>,
+    #[schemars(description = "Return full JSON with all fields (default: false, returns compact summary)")]
+    verbose: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -305,12 +346,13 @@ impl TodomocopServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "List tasks with optional filters")]
+    #[tool(description = "List tasks with optional filters. Returns compact one-line-per-task summary by default. Set verbose=true for full JSON with descriptions, timestamps, and linked PR/Linear contexts.")]
     fn list_tasks(
         &self,
         Parameters(params): Parameters<ListTasksParams>,
     ) -> Result<CallToolResult, McpError> {
         let status = params.status.map(|s| parse_status(&s)).transpose()?;
+        let verbose = params.verbose.unwrap_or(false);
 
         let filter = TaskFilter {
             status,
@@ -322,18 +364,23 @@ impl TodomocopServer {
 
         let result = self.db.run(move |db| {
             let tasks = db.list_tasks(filter)?;
-            Ok(serde_json::to_string_pretty(&tasks)?)
+            if verbose {
+                Ok(serde_json::to_string_pretty(&tasks)?)
+            } else {
+                Ok(format_tasks_compact(&tasks))
+            }
         }).map_err(to_mcp_error)?;
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "Search tasks by title and description")]
+    #[tool(description = "Search tasks by title and description. Returns compact summary by default. Set verbose=true for full JSON.")]
     fn search(
         &self,
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
         let status = params.status.map(|s| parse_status(&s)).transpose()?;
+        let verbose = params.verbose.unwrap_or(false);
 
         let filter = TaskFilter {
             status,
@@ -344,7 +391,11 @@ impl TodomocopServer {
 
         let result = self.db.run(move |db| {
             let tasks = db.search(&query, filter)?;
-            Ok(serde_json::to_string_pretty(&tasks)?)
+            if verbose {
+                Ok(serde_json::to_string_pretty(&tasks)?)
+            } else {
+                Ok(format_tasks_compact(&tasks))
+            }
         }).map_err(to_mcp_error)?;
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
