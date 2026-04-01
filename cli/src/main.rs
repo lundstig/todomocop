@@ -434,11 +434,8 @@ fn main() -> Result<()> {
                 deadline,
                 planned_date,
                 next_action,
-                tags: tags.clone(),
+                tags,
             })?;
-            for tag in &tags {
-                db.tag_task(id, tag)?;
-            }
             println!("Created task #{id}");
         }
 

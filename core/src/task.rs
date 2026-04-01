@@ -102,7 +102,7 @@ impl Db {
                 }))
                 .map_or(1, |max| max + 1);
 
-            txn.insert(schema::Task {
+            let task_row = txn.insert(schema::Task {
                 external_id: next_id,
                 title: params.title.clone(),
                 description: description.clone(),
@@ -118,6 +118,26 @@ impl Db {
                 updated_at: now.clone(),
             })
             .map_err(|_| anyhow::anyhow!("task with this external_id already exists"))?;
+
+            // Apply tags within the same transaction
+            for tag_name in &params.tags {
+                let tag_row = match txn.query_one(optional(|row| {
+                    let tag = row.and(schema::Tag.name(tag_name.to_owned()));
+                    row.then(tag)
+                })) {
+                    Some(existing) => existing,
+                    None => txn
+                        .insert(schema::Tag {
+                            name: tag_name.clone(),
+                            description: String::new(),
+                        })
+                        .map_err(|_| anyhow::anyhow!("failed to create tag: {tag_name}"))?,
+                };
+                txn.insert_ok(schema::TaskTag {
+                    task: task_row,
+                    tag: tag_row,
+                });
+            }
 
             Ok(next_id)
         })
@@ -406,11 +426,11 @@ mod tests {
         // --- test_snooze_task ---
         let snooze_id = db.add_task(make_add_task("Snoozeable", "personal")).unwrap();
 
-        let until = chrono::NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
+        let until = chrono::NaiveDate::from_ymd_opt(2099, 1, 1).unwrap();
         db.snooze(snooze_id, until).unwrap();
 
         let task = db.get_task(snooze_id).unwrap().expect("task should exist");
-        assert_eq!(task.snooze_until, Some("2026-04-01".to_string()));
+        assert_eq!(task.snooze_until, Some("2099-01-01".to_string()));
 
         // =====================================================================
         // Query tests (list_tasks + search)
@@ -821,6 +841,26 @@ mod tests {
             }).unwrap();
             assert_eq!(tagged_work.len(), 1);
             assert_eq!(tagged_work[0].id, id7);
+        }
+
+        // --- test: add_task with tags applies them in one transaction ---
+        {
+            let tagged_id = db.add_task(AddTask {
+                title: "Pre-tagged task".into(),
+                description: None,
+                status: None,
+                priority: None,
+                workspace: "work".into(),
+                deadline: None,
+                planned_date: None,
+                next_action: None,
+                tags: vec!["audit".into(), "repo:todomocop".into()],
+            }).unwrap();
+
+            let task = db.get_task(tagged_id).unwrap().unwrap();
+            let mut tag_names: Vec<&str> = task.tags.iter().map(|t| t.name.as_str()).collect();
+            tag_names.sort();
+            assert_eq!(tag_names, vec!["audit", "repo:todomocop"]);
         }
 
         // --- test: canceled status roundtrips ---

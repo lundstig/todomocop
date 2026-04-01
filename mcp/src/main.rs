@@ -341,8 +341,6 @@ impl TodomocopServer {
         Parameters(params): Parameters<AddTaskParams>,
     ) -> Result<CallToolResult, McpError> {
         let status = params.status.map(|s| parse_status(&s)).transpose()?;
-        let tags = params.tags.unwrap_or_default();
-
         let add = AddTask {
             title: params.title,
             description: params.description,
@@ -352,14 +350,11 @@ impl TodomocopServer {
             deadline: params.deadline,
             planned_date: params.planned_date,
             next_action: params.next_action,
-            tags: tags.clone(),
+            tags: params.tags.unwrap_or_default(),
         };
 
         let result = self.db.run(move |db| {
             let id = db.add_task(add)?;
-            for tag in &tags {
-                db.tag_task(id, tag)?;
-            }
             Ok(format!("Created task #{id}"))
         }).map_err(to_mcp_error)?;
 
