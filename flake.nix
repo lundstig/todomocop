@@ -15,6 +15,26 @@
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
     in
     {
+      packages = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        rec {
+          todomocop = pkgs.rustPlatform.buildRustPackage {
+            pname = "todomocop";
+            version = "0.1.0";
+            src = self;
+
+            cargoLock.lockFile = ./Cargo.lock;
+
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            buildInputs = [ pkgs.sqlite ];
+          };
+
+          default = todomocop;
+        }
+      );
+
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs {
