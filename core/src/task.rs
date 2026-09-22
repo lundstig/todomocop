@@ -741,54 +741,33 @@ mod tests {
             assert!(!linear_task.unwrap().linear_contexts.is_empty(), "Linear task should have linear context in list");
         }
 
-        // --- test_github_refresh_on_stale ---
-        // Swap in a mock HTTP client and config to test refresh behavior.
+        // Listing is local-only even when external contexts are stale.
         {
             use std::sync::Arc;
             use std::time::Duration;
             use crate::http::{HttpClient, IntegrationConfig};
 
-            struct MockHttpClient;
+            struct UnexpectedHttpClient;
 
-            impl HttpClient for MockHttpClient {
+            impl HttpClient for UnexpectedHttpClient {
                 fn get(&self, _url: &str, _headers: &[(&str, &str)]) -> anyhow::Result<Vec<u8>> {
-                    let response = serde_json::json!({
-                        "state": "closed",
-                        "merged": true,
-                        "title": "My PR"
-                    });
-                    Ok(serde_json::to_vec(&response).unwrap())
+                    panic!("list_tasks must not make HTTP requests")
                 }
 
                 fn post(&self, _url: &str, _headers: &[(&str, &str)], _body: &[u8]) -> anyhow::Result<Vec<u8>> {
-                    Err(anyhow::anyhow!("not used"))
+                    panic!("list_tasks must not make HTTP requests")
                 }
             }
 
-            // Create a fresh task for the refresh test
-            let refresh_task_id = db.add_task(make_add_task("Refresh test", "work")).unwrap();
-            db.link_github_pr(refresh_task_id, "https://github.com/owner/repo/pull/99").unwrap();
-
-            // Verify initial state is "unknown"
-            let task = db.get_task(refresh_task_id).unwrap().unwrap();
-            assert_eq!(task.github_pr_contexts[0].state, "unknown");
-
-            // Swap in mock HTTP client and zero staleness threshold
-            db.http = Arc::new(MockHttpClient);
+            db.http = Arc::new(UnexpectedHttpClient);
             db.config = IntegrationConfig {
                 github_token: Some("fake-token".into()),
-                linear_api_key: None,
-                staleness_threshold: Duration::from_secs(0), // always stale
+                linear_api_key: Some("fake-key".into()),
+                staleness_threshold: Duration::ZERO,
             };
 
-            // list_tasks should trigger refresh since staleness_threshold=0
             let tasks = db.list_tasks(TaskFilter::default()).unwrap();
-            let refreshed = tasks.iter().find(|t| t.id == refresh_task_id).unwrap();
-            assert_eq!(refreshed.github_pr_contexts[0].state, "merged", "state should be refreshed to 'merged' from mock API response");
-
-            // Verify it's persisted in the DB too
-            let task_after = db.get_task(refresh_task_id).unwrap().unwrap();
-            assert_eq!(task_after.github_pr_contexts[0].state, "merged");
+            assert!(!tasks.is_empty());
         }
 
         // --- test: find_task_by_github_pr ---

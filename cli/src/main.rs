@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
@@ -538,8 +538,11 @@ fn main() -> Result<()> {
                 let existing = db.list_tasks(TaskFilter::default())?;
                 let token = std::env::var("GITHUB_TOKEN")
                     .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN not set"))?;
-                let github = todomocop_sync::github::GithubClient::new(http.as_ref(), token)?;
-                let prs = github.fetch_prs(since_days)?;
+                let github = todomocop_sync::github::GithubClient::new(http.as_ref(), token)
+                    .context("authenticate with GitHub")?;
+                let prs = github
+                    .fetch_prs(since_days)
+                    .context("fetch GitHub pull requests")?;
                 let actions = todomocop_sync::reconcile::reconcile_github(&prs, &existing, github.username());
                 let summary = todomocop_sync::runner::apply_actions(&db, &actions);
                 total_summary.merge(&summary);
@@ -555,7 +558,9 @@ fn main() -> Result<()> {
                 let api_key = std::env::var("LINEAR_API_KEY")
                     .map_err(|_| anyhow::anyhow!("LINEAR_API_KEY not set"))?;
                 let linear = todomocop_sync::linear::LinearClient::new(http.as_ref(), api_key);
-                let issues = linear.fetch_assigned_issues()?;
+                let issues = linear
+                    .fetch_assigned_issues()
+                    .context("fetch Linear issues")?;
                 let actions = todomocop_sync::reconcile::reconcile_linear(&issues, &existing);
                 let summary = todomocop_sync::runner::apply_actions(&db, &actions);
                 total_summary.merge(&summary);

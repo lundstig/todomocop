@@ -125,8 +125,8 @@ impl Db {
             .collect())
     }
 
-    /// Refresh Linear contexts for the given tasks if they are stale.
-    pub(crate) fn refresh_linear_contexts(&self, tasks: &mut [Task]) -> Result<()> {
+    /// Explicitly refresh stale Linear contexts for the given tasks.
+    pub fn refresh_linear_contexts(&self, tasks: &mut [Task]) -> Result<()> {
         let linear_api_key = match &self.config.linear_api_key {
             Some(k) => k.clone(),
             None => return Ok(()),

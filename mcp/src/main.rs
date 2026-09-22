@@ -56,7 +56,11 @@ fn format_tasks_compact(tasks: &[Task]) -> String {
     if tasks.is_empty() {
         return "No tasks found.".to_string();
     }
-    tasks.iter().map(|t| format_task_compact(t)).collect::<Vec<_>>().join("\n")
+    tasks
+        .iter()
+        .map(format_task_compact)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ impl Db {
                 None => true,
             })
             .filter(|t| match filter.priority_max {
-                Some(max) => t.priority.map_or(false, |p| p <= max),
+                Some(max) => t.priority.is_some_and(|p| p <= max),
                 None => true,
             })
             .filter(|t| {
@@ -72,10 +72,6 @@ impl Db {
             task.linear_contexts = self.load_linear_contexts(task.id)?;
             task.tags = self.load_tags_for_task(task.id)?;
         }
-
-        // Refresh stale contexts
-        self.refresh_github_contexts(&mut tasks)?;
-        self.refresh_linear_contexts(&mut tasks)?;
 
         // Apply tag filter (after tags are populated)
         if let Some(ref tag_name) = filter.tag {

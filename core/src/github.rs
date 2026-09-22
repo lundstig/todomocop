@@ -135,8 +135,8 @@ impl Db {
             .collect())
     }
 
-    /// Refresh GitHub PR contexts for the given tasks if they are stale.
-    pub(crate) fn refresh_github_contexts(&self, tasks: &mut [Task]) -> Result<()> {
+    /// Explicitly refresh stale GitHub PR contexts for the given tasks.
+    pub fn refresh_github_contexts(&self, tasks: &mut [Task]) -> Result<()> {
         let github_token = match &self.config.github_token {
             Some(t) => t.clone(),
             None => return Ok(()),
