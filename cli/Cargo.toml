@@ -8,6 +8,7 @@ todomocop-core = { path = "../core" }
 todomocop-sync = { path = "../sync" }
 clap = { version = "4", features = ["derive", "env"] }
 chrono = "0.4"
+serde = "1"
 serde_json = "1"
 anyhow = "1"
 ureq = "3"

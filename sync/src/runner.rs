@@ -3,7 +3,7 @@ use todomocop_core::Db;
 use todomocop_core::types::{AddTask, EditTask, TaskStatus};
 use crate::types::SyncAction;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct SyncSummary {
     pub created: Vec<String>,
     pub completed: Vec<String>,

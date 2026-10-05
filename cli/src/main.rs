@@ -50,6 +50,9 @@ struct Cli {
     /// Disable colors and formatting (auto-detected when piped)
     #[arg(long, global = true)]
     plain: bool,
+    /// Print machine-readable JSON (writes print the affected task; errors print {"error": ...})
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -385,8 +388,33 @@ fn print_sync_summary(summary: &todomocop_sync::runner::SyncSummary) {
 // Main
 // ---------------------------------------------------------------------------
 
-fn main() -> Result<()> {
+fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn print_task_json(db: &Db, id: i64) -> Result<()> {
+    let task = db
+        .get_task(id)?
+        .ok_or_else(|| anyhow::anyhow!("task not found: {id}"))?;
+    print_json(&task)
+}
+
+fn main() {
     let cli = Cli::parse();
+    let json = cli.json;
+    if let Err(err) = run(cli) {
+        if json {
+            println!("{}", serde_json::json!({ "error": format!("{err:#}") }));
+        } else {
+            eprintln!("Error: {err:#}");
+        }
+        std::process::exit(1);
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
+    let json = cli.json;
     let pretty = !cli.plain && std::io::stdout().is_terminal();
 
     let db_path = cli.db.unwrap_or_else(|| {
@@ -436,7 +464,11 @@ fn main() -> Result<()> {
                 next_action,
                 tags,
             })?;
-            println!("Created task #{id}");
+            if json {
+                print_task_json(&db, id)?;
+            } else {
+                println!("Created task #{id}");
+            }
         }
 
         Commands::List {
@@ -454,7 +486,11 @@ fn main() -> Result<()> {
                 ..Default::default()
             };
             let tasks = db.list_tasks(filter)?;
-            print_tasks(&tasks, pretty);
+            if json {
+                print_json(&tasks)?;
+            } else {
+                print_tasks(&tasks, pretty);
+            }
         }
 
         Commands::Edit {
@@ -483,12 +519,20 @@ fn main() -> Result<()> {
                     next_action: next_action.map(Some),
                 },
             )?;
-            println!("Updated task #{id}");
+            if json {
+                print_task_json(&db, id)?;
+            } else {
+                println!("Updated task #{id}");
+            }
         }
 
         Commands::Delete { id } => {
             db.delete_task(id)?;
-            println!("Deleted task #{id}");
+            if json {
+                print_json(&serde_json::json!({ "id": id, "deleted": true }))?;
+            } else {
+                println!("Deleted task #{id}");
+            }
         }
 
         Commands::Search { query, workspace, tag } => {
@@ -498,7 +542,11 @@ fn main() -> Result<()> {
                 ..Default::default()
             };
             let tasks = db.search(&query, filter)?;
-            print_tasks(&tasks, pretty);
+            if json {
+                print_json(&tasks)?;
+            } else {
+                print_tasks(&tasks, pretty);
+            }
         }
 
         Commands::Snooze { id, until } => {
@@ -506,7 +554,11 @@ fn main() -> Result<()> {
                 .parse::<chrono::NaiveDate>()
                 .map_err(|e| anyhow::anyhow!("invalid date '{}': {e}", until))?;
             db.snooze(id, date)?;
-            println!("Snoozed task #{id} until {until}");
+            if json {
+                print_task_json(&db, id)?;
+            } else {
+                println!("Snoozed task #{id} until {until}");
+            }
         }
 
         Commands::Sync { source, since } => {
@@ -569,7 +621,9 @@ fn main() -> Result<()> {
                 }
             }
 
-            if pretty {
+            if json {
+                print_json(&total_summary)?;
+            } else if pretty {
                 print_sync_summary(&total_summary);
             } else {
                 println!("{total_summary}");
@@ -578,17 +632,27 @@ fn main() -> Result<()> {
 
         Commands::Tag { id, tag } => {
             db.tag_task(id, &tag)?;
-            println!("Tagged task #{id} with '{tag}'");
+            if json {
+                print_task_json(&db, id)?;
+            } else {
+                println!("Tagged task #{id} with '{tag}'");
+            }
         }
 
         Commands::Untag { id, tag } => {
             db.untag_task(id, &tag)?;
-            println!("Removed tag '{tag}' from task #{id}");
+            if json {
+                print_task_json(&db, id)?;
+            } else {
+                println!("Removed tag '{tag}' from task #{id}");
+            }
         }
 
         Commands::Tags { workspace } => {
             let tags = db.list_tags(workspace.as_deref())?;
-            if tags.is_empty() {
+            if json {
+                print_json(&tags)?;
+            } else if tags.is_empty() {
                 if pretty {
                     println!("{}", "No tags found.".dimmed());
                 } else {
@@ -622,12 +686,26 @@ fn main() -> Result<()> {
 
         Commands::TagEdit { tag, name, description } => {
             db.edit_tag(&tag, name.as_deref(), description.as_deref())?;
-            println!("Updated tag '{tag}'");
+            if json {
+                let name = name.as_deref().unwrap_or(&tag);
+                let info = db
+                    .list_tags(None)?
+                    .into_iter()
+                    .find(|t| t.name == name)
+                    .ok_or_else(|| anyhow::anyhow!("tag not found: {name}"))?;
+                print_json(&info)?;
+            } else {
+                println!("Updated tag '{tag}'");
+            }
         }
 
         Commands::TagDelete { tag } => {
             db.delete_tag(&tag)?;
-            println!("Deleted tag '{tag}'");
+            if json {
+                print_json(&serde_json::json!({ "tag": tag, "deleted": true }))?;
+            } else {
+                println!("Deleted tag '{tag}'");
+            }
         }
     }
 

@@ -1336,6 +1336,7 @@ dependencies = [
  "colored",
  "dirs",
  "indicatif",
+ "serde",
  "serde_json",
  "todomocop-core",
  "todomocop-sync",
