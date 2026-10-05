@@ -71,16 +71,6 @@ pub fn reconcile_github(prs: &[GithubPr], existing: &[Task], me: &str) -> Vec<Sy
     actions
 }
 
-pub fn reconcile_closed_github(prs: &[GithubPr], existing: &[Task]) -> Vec<SyncAction> {
-    let pr_by_url: HashMap<&str, &GithubPr> =
-        prs.iter().map(|pr| (pr.url.as_str(), pr)).collect();
-    existing
-        .iter()
-        .filter(|task| task.status != TaskStatus::Done && task.status != TaskStatus::Canceled)
-        .filter_map(|task| terminal_github_action(task, &pr_by_url))
-        .collect()
-}
-
 pub fn reconcile_github_contexts(prs: &[GithubPr], existing: &[Task]) -> Vec<SyncAction> {
     let contexts_by_url: HashMap<&str, (i64, &todomocop_core::types::GithubPrContextData)> = existing
         .iter()

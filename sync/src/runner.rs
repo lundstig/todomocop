@@ -2,9 +2,12 @@ use anyhow::Result;
 use todomocop_core::Db;
 use todomocop_core::types::{AddTask, EditTask, GithubPrContextUpdate, TaskStatus};
 use crate::types::SyncAction;
+use crate::schedule::{ChangeCounts, SkipReason};
 
 #[derive(Debug, Default, serde::Serialize)]
 pub struct SyncSummary {
+    pub skipped: bool,
+    pub reason: Option<SkipReason>,
     pub created: Vec<String>,
     pub completed: Vec<String>,
     pub canceled: Vec<String>,
@@ -15,6 +18,12 @@ pub struct SyncSummary {
 
 impl std::fmt::Display for SyncSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(reason) = self.reason {
+            return write!(f, "Skipped: {}", match reason {
+                SkipReason::Fresh => "fresh",
+                SkipReason::Running => "running",
+            });
+        }
         write!(
             f,
             "Created {}, completed {}, canceled {}, updated {}, linked {}",
@@ -32,6 +41,14 @@ impl std::fmt::Display for SyncSummary {
 }
 
 impl SyncSummary {
+    pub fn skipped(reason: SkipReason) -> Self {
+        Self {
+            skipped: true,
+            reason: Some(reason),
+            ..Default::default()
+        }
+    }
+
     pub fn merge(&mut self, other: &SyncSummary) {
         self.created.extend(other.created.iter().cloned());
         self.completed.extend(other.completed.iter().cloned());
@@ -48,6 +65,55 @@ impl SyncSummary {
             && self.updated.is_empty()
             && self.linked.is_empty()
     }
+
+    pub fn counts(&self) -> ChangeCounts {
+        ChangeCounts {
+            created: self.created.len(),
+            completed: self.completed.len(),
+            canceled: self.canceled.len(),
+            updated: self.updated.len(),
+            linked: self.linked.len(),
+        }
+    }
+}
+
+pub fn preview_actions(tasks: &[todomocop_core::types::Task], actions: &[SyncAction]) -> SyncSummary {
+    let mut summary = SyncSummary::default();
+    for action in actions {
+        let title = |task_id| {
+            tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .map(|task| task.title.as_str())
+                .unwrap_or("unknown task")
+        };
+        match action {
+            SyncAction::CreateTaskWithGithub { title, .. }
+            | SyncAction::CreateTaskWithLinear { title, .. } => summary.created.push(title.clone()),
+            SyncAction::MarkDone { task_id } => {
+                summary.completed.push(format!("#{task_id} {}", title(*task_id)))
+            }
+            SyncAction::MarkCanceled { task_id } => {
+                summary.canceled.push(format!("#{task_id} {}", title(*task_id)))
+            }
+            SyncAction::UpdateStatus { task_id, status } => summary
+                .updated
+                .push(format!("#{task_id} {} → {status}", title(*task_id))),
+            SyncAction::LinkLinearToExistingTask { task_id, linear } => summary
+                .linked
+                .push(format!("#{task_id} {} ← {}", title(*task_id), linear.identifier)),
+            SyncAction::LinkGithubPrToExistingTask { task_id, pr_url } => summary
+                .linked
+                .push(format!("#{task_id} {} ← {pr_url}", title(*task_id))),
+            SyncAction::EnsureTag { task_id, tag } => summary
+                .updated
+                .push(format!("#{task_id} {} +{}", title(*task_id), tag.as_str())),
+            SyncAction::UpdateGithubContext { task_id, pr, .. } => summary
+                .updated
+                .push(format!("#{task_id} {} ← {}", title(*task_id), pr.url)),
+        }
+    }
+    summary
 }
 
 pub fn apply_actions(db: &Db, actions: &[SyncAction]) -> SyncSummary {
