@@ -141,6 +141,12 @@ enum Commands {
         #[arg(long, default_value = "7d")]
         since: String,
     },
+    /// Refresh every open task's linked PRs and close terminal ones
+    CloseMerged {
+        /// Show what would change without writing to the database
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Tag a task
     Tag {
         /// Task ID
@@ -384,6 +390,13 @@ fn print_sync_summary(summary: &todomocop_sync::runner::SyncSummary) {
     }
 }
 
+#[derive(serde::Serialize)]
+struct CloseMergedPreview {
+    id: i64,
+    title: String,
+    status: TaskStatus,
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -587,15 +600,32 @@ fn run(cli: Cli) -> Result<()> {
 
             if do_github {
                 let sp = spinner("Syncing GitHub PRs…");
-                let existing = db.list_tasks(TaskFilter::default())?;
+                let existing = db.list_tasks(TaskFilter {
+                    include_snoozed: true,
+                    ..Default::default()
+                })?;
                 let token = std::env::var("GITHUB_TOKEN")
                     .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN not set"))?;
                 let github = todomocop_sync::github::GithubClient::new(http.as_ref(), token)
                     .context("authenticate with GitHub")?;
-                let prs = github
+                let discovered = github
                     .fetch_prs(since_days)
                     .context("fetch GitHub pull requests")?;
-                let actions = todomocop_sync::reconcile::reconcile_github(&prs, &existing, github.username());
+                let linked = github
+                    .fetch_linked_prs(&existing)
+                    .context("refresh linked GitHub pull requests")?;
+                let prs = todomocop_sync::github::merge_prs(discovered, linked);
+                let mut actions = todomocop_sync::reconcile::reconcile_github_contexts(&prs, &existing);
+                actions.extend(todomocop_sync::reconcile::reconcile_github_tags(
+                    &prs,
+                    &existing,
+                    github.username(),
+                ));
+                actions.extend(todomocop_sync::reconcile::reconcile_github(
+                    &prs,
+                    &existing,
+                    github.username(),
+                ));
                 let summary = todomocop_sync::runner::apply_actions(&db, &actions);
                 total_summary.merge(&summary);
                 if let Some(sp) = sp {
@@ -606,14 +636,18 @@ fn run(cli: Cli) -> Result<()> {
             if do_linear {
                 let sp = spinner("Syncing Linear issues…");
                 // Re-read tasks after GitHub sync so dedup sees newly created tasks
-                let existing = db.list_tasks(TaskFilter::default())?;
+                let existing = db.list_tasks(TaskFilter {
+                    include_snoozed: true,
+                    ..Default::default()
+                })?;
                 let api_key = std::env::var("LINEAR_API_KEY")
                     .map_err(|_| anyhow::anyhow!("LINEAR_API_KEY not set"))?;
                 let linear = todomocop_sync::linear::LinearClient::new(http.as_ref(), api_key);
                 let issues = linear
                     .fetch_assigned_issues()
                     .context("fetch Linear issues")?;
-                let actions = todomocop_sync::reconcile::reconcile_linear(&issues, &existing);
+                let mut actions = todomocop_sync::reconcile::reconcile_linear_tags(&existing);
+                actions.extend(todomocop_sync::reconcile::reconcile_linear(&issues, &existing));
                 let summary = todomocop_sync::runner::apply_actions(&db, &actions);
                 total_summary.merge(&summary);
                 if let Some(sp) = sp {
@@ -627,6 +661,73 @@ fn run(cli: Cli) -> Result<()> {
                 print_sync_summary(&total_summary);
             } else {
                 println!("{total_summary}");
+            }
+        }
+
+        Commands::CloseMerged { dry_run } => {
+            let existing = db.list_tasks(TaskFilter {
+                include_snoozed: true,
+                ..Default::default()
+            })?;
+            let token = std::env::var("GITHUB_TOKEN")
+                .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN not set"))?;
+            let github = todomocop_sync::github::GithubClient::new(http.as_ref(), token)
+                .context("authenticate with GitHub")?;
+            let prs = github
+                .fetch_linked_prs(&existing)
+                .context("refresh linked GitHub pull requests")?;
+            let close_actions = todomocop_sync::reconcile::reconcile_closed_github(&prs, &existing);
+            let previews: Vec<CloseMergedPreview> = close_actions
+                .iter()
+                .filter_map(|action| match action {
+                    todomocop_sync::types::SyncAction::MarkDone { task_id } => {
+                        existing.iter().find(|task| task.id == *task_id).map(|task| CloseMergedPreview {
+                            id: task.id,
+                            title: task.title.clone(),
+                            status: TaskStatus::Done,
+                        })
+                    }
+                    todomocop_sync::types::SyncAction::MarkCanceled { task_id } => {
+                        existing.iter().find(|task| task.id == *task_id).map(|task| CloseMergedPreview {
+                            id: task.id,
+                            title: task.title.clone(),
+                            status: TaskStatus::Canceled,
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            if dry_run {
+                if json {
+                    print_json(&previews)?;
+                } else if previews.is_empty() {
+                    println!("No merged or closed PR tasks found.");
+                } else {
+                    for preview in &previews {
+                        println!("Would mark #{} {}: {}", preview.id, preview.status, preview.title);
+                    }
+                }
+            } else {
+                let mut actions = todomocop_sync::reconcile::reconcile_github_contexts(&prs, &existing);
+                actions.extend(close_actions);
+                let summary = todomocop_sync::runner::apply_actions(&db, &actions);
+                if !summary.errors.is_empty() {
+                    anyhow::bail!(summary.errors.join("; "));
+                }
+                if json {
+                    let mut tasks = Vec::new();
+                    for preview in &previews {
+                        if let Some(task) = db.get_task(preview.id)? {
+                            tasks.push(task);
+                        }
+                    }
+                    print_json(&tasks)?;
+                } else if pretty {
+                    print_sync_summary(&summary);
+                } else {
+                    println!("{summary}");
+                }
             }
         }
 

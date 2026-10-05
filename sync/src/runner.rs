@@ -1,6 +1,6 @@
 use anyhow::Result;
 use todomocop_core::Db;
-use todomocop_core::types::{AddTask, EditTask, TaskStatus};
+use todomocop_core::types::{AddTask, EditTask, GithubPrContextUpdate, TaskStatus};
 use crate::types::SyncAction;
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -79,7 +79,7 @@ fn task_title(db: &Db, task_id: i64) -> String {
 
 fn apply_one(db: &Db, action: &SyncAction) -> Result<(ActionKind, String)> {
     match action {
-        SyncAction::CreateTaskWithGithub { title, pr, status } => {
+        SyncAction::CreateTaskWithGithub { title, pr, status, source } => {
             let task_id = db.add_task(AddTask {
                 title: title.clone(),
                 description: None,
@@ -89,9 +89,17 @@ fn apply_one(db: &Db, action: &SyncAction) -> Result<(ActionKind, String)> {
                 deadline: None,
                 planned_date: None,
                 next_action: None,
-                tags: vec![],
+                tags: vec![source.as_str().to_string()],
             })?;
             db.link_github_pr(task_id, &pr.url)?;
+            db.update_github_pr_context(task_id, &GithubPrContextUpdate {
+                url: pr.url.clone(),
+                state: "open".to_string(),
+                title: pr.title.clone(),
+                author: pr.author.clone(),
+                reviewers: pr.reviewers.clone(),
+                review_state: pr.review_state.clone(),
+            })?;
             Ok((ActionKind::Created, format!("#{task_id} {title}")))
         }
         SyncAction::CreateTaskWithLinear { title, linear, status, priority, github_pr_urls } => {
@@ -104,7 +112,7 @@ fn apply_one(db: &Db, action: &SyncAction) -> Result<(ActionKind, String)> {
                 deadline: None,
                 planned_date: None,
                 next_action: None,
-                tags: vec![],
+                tags: vec!["linear".to_string()],
             })?;
             db.link_linear(task_id, &linear.url)?;
             for pr_url in github_pr_urls {
@@ -139,12 +147,30 @@ fn apply_one(db: &Db, action: &SyncAction) -> Result<(ActionKind, String)> {
         SyncAction::LinkLinearToExistingTask { task_id, linear } => {
             let title = task_title(db, *task_id);
             db.link_linear(*task_id, &linear.url)?;
+            db.tag_task(*task_id, "linear")?;
             Ok((ActionKind::Linked, format!("#{task_id} {title} ← {}", linear.identifier)))
         }
         SyncAction::LinkGithubPrToExistingTask { task_id, pr_url } => {
             let title = task_title(db, *task_id);
             db.link_github_pr(*task_id, pr_url)?;
             Ok((ActionKind::Linked, format!("#{task_id} {title} ← {pr_url}")))
+        }
+        SyncAction::EnsureTag { task_id, tag } => {
+            let title = task_title(db, *task_id);
+            db.tag_task(*task_id, tag.as_str())?;
+            Ok((ActionKind::Updated, format!("#{task_id} {title} +{}", tag.as_str())))
+        }
+        SyncAction::UpdateGithubContext { task_id, pr, state } => {
+            let title = task_title(db, *task_id);
+            db.update_github_pr_context(*task_id, &GithubPrContextUpdate {
+                url: pr.url.clone(),
+                state: state.as_str().to_string(),
+                title: pr.title.clone(),
+                author: pr.author.clone(),
+                reviewers: pr.reviewers.clone(),
+                review_state: pr.review_state.clone(),
+            })?;
+            Ok((ActionKind::Updated, format!("#{task_id} {title} ← {}", pr.url)))
         }
     }
 }
@@ -174,6 +200,7 @@ mod tests {
                 review_state: HashMap::new(),
             },
             status: TaskStatus::Ready,
+            source: SourceTag::MyPr,
         }];
 
         let summary = apply_actions(&db, &actions);
@@ -186,6 +213,9 @@ mod tests {
         assert_eq!(tasks[0].title, "Fix bug");
         assert_eq!(tasks[0].status, TaskStatus::Ready);
         assert_eq!(tasks[0].workspace, "work");
+        assert!(tasks[0].tags.iter().any(|tag| tag.name == "my-pr"));
+        assert_eq!(tasks[0].github_pr_contexts[0].author, "me");
+        assert_eq!(tasks[0].github_pr_contexts[0].title, "Fix bug");
 
         // 2. Mark it done
         let done_actions = vec![SyncAction::MarkDone { task_id: tasks[0].id }];
@@ -221,6 +251,7 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].status, TaskStatus::Working);
         assert_eq!(tasks[0].priority, Some(2));
+        assert!(tasks[0].tags.iter().any(|tag| tag.name == "linear"));
 
         // Cancel it (issue unassigned)
         let cancel_actions = vec![SyncAction::MarkCanceled { task_id: tasks[0].id }];
@@ -283,6 +314,7 @@ mod tests {
                     review_state: HashMap::new(),
                 },
                 status: TaskStatus::Ready,
+                source: SourceTag::MyPr,
             },
         ];
 
@@ -308,6 +340,7 @@ mod tests {
                 review_state: HashMap::new(),
             },
             status: TaskStatus::Ready,
+            source: SourceTag::MyPr,
         }];
         apply_actions(&db, &create);
 
@@ -390,6 +423,7 @@ mod tests {
                 review_state: HashMap::new(),
             },
             status: TaskStatus::Ready,
+            source: SourceTag::MyPr,
         }];
         apply_actions(&db, &gh_actions);
 

@@ -2,6 +2,23 @@ use std::collections::HashMap;
 
 use todomocop_core::types::TaskStatus;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceTag {
+    Review,
+    MyPr,
+    Linear,
+}
+
+impl SourceTag {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Review => "review",
+            Self::MyPr => "my-pr",
+            Self::Linear => "linear",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GithubPr {
     pub url: String,
@@ -37,6 +54,7 @@ pub enum SyncAction {
         title: String,
         pr: CreateGithubLink,
         status: TaskStatus,
+        source: SourceTag,
     },
     CreateTaskWithLinear {
         title: String,
@@ -63,6 +81,15 @@ pub enum SyncAction {
         task_id: i64,
         pr_url: String,
     },
+    EnsureTag {
+        task_id: i64,
+        tag: SourceTag,
+    },
+    UpdateGithubContext {
+        task_id: i64,
+        pr: CreateGithubLink,
+        state: GithubPrState,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,4 +108,14 @@ pub struct CreateLinearLink {
     pub identifier: String,
     pub url: String,
     pub state_type: String,
+}
+
+impl GithubPrState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Merged => "merged",
+            Self::Closed => "closed",
+        }
+    }
 }

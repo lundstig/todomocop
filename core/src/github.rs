@@ -5,7 +5,7 @@ use chrono::Utc;
 use rust_query::{optional, Select};
 
 use crate::schema;
-use crate::types::{GithubPrContextData, Task, TaskId};
+use crate::types::{GithubPrContextData, GithubPrContextUpdate, Task, TaskId};
 use crate::Db;
 
 /// Parse a GitHub PR URL into (repo, number).
@@ -89,6 +89,51 @@ impl Db {
             Some(id) => self.get_task(id),
             None => Ok(None),
         }
+    }
+
+    pub fn update_github_pr_context(
+        &self,
+        task_id: TaskId,
+        update: &GithubPrContextUpdate,
+    ) -> Result<()> {
+        let reviewers = serde_json::to_string(&update.reviewers)?;
+        let review_state = serde_json::to_string(&update.review_state)?;
+        let now = Utc::now().to_rfc3339();
+
+        self.database.transaction_mut(|txn| {
+            let task_row = txn
+                .query_one(optional(|row| {
+                    let task = row.and(schema::Task.external_id(task_id));
+                    row.then(task)
+                }))
+                .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))?;
+
+            let context = txn
+                .query_one(optional(|row| {
+                    let context = row.and(schema::GithubPrContext.url(update.url.clone()));
+                    row.then(context)
+                }))
+                .ok_or_else(|| anyhow::anyhow!("GitHub PR context not found: {}", update.url))?;
+
+            let belongs_to_task = txn.query(|q| {
+                let context = q.join(schema::GithubPrContext);
+                q.filter(context.task.eq(&task_row));
+                q.filter(context.url.eq(&update.url));
+                q.into_vec(())
+            });
+            if belongs_to_task.is_empty() {
+                anyhow::bail!("GitHub PR context does not belong to task {task_id}: {}", update.url);
+            }
+
+            let mut context = txn.mutable(&context);
+            context.state = update.state.clone();
+            context.title = update.title.clone();
+            context.author = update.author.clone();
+            context.reviewers = reviewers.clone();
+            context.review_state = review_state.clone();
+            context.last_refreshed = now.clone();
+            Ok(())
+        })
     }
 
     /// Load all GithubPrContexts for a given task (by external_id).
@@ -201,41 +246,79 @@ impl Db {
                     .unwrap_or("")
                     .to_string();
 
-                let now = Utc::now().to_rfc3339();
+                let author = json
+                    .get("user")
+                    .and_then(|user| user.get("login"))
+                    .and_then(|login| login.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
-                // Update the DB row matching this context's URL
-                let task_id = task.id;
-                let ctx_url = ctx.url.clone();
-                let state_clone = state.clone();
-                let title_clone = title.clone();
-                let now_clone = now.clone();
-                self.database.transaction_mut_ok(|txn| {
-                    let task_row = txn.query_one(optional(|row| {
-                        let t = row.and(schema::Task.external_id(task_id));
-                        row.then(t)
-                    }));
+                let mut reviewers: Vec<String> = json
+                    .get("requested_reviewers")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|reviewer| reviewer.get("login").and_then(|login| login.as_str()))
+                    .map(str::to_owned)
+                    .collect();
+                let requested_reviewers = reviewers.clone();
 
-                    if let Some(task_row) = task_row {
-                        let ctx_rows: Vec<_> = txn.query(|q| {
-                            let c = q.join(schema::GithubPrContext);
-                            q.filter(c.task.eq(task_row));
-                            q.filter(c.url.eq(&ctx_url));
-                            q.into_vec(c)
-                        });
-
-                        if let Some(ctx_row) = ctx_rows.into_iter().next() {
-                            let mut ctx_mut = txn.mutable(&ctx_row);
-                            ctx_mut.state = state_clone.clone();
-                            ctx_mut.title = title_clone.clone();
-                            ctx_mut.last_refreshed = now_clone.clone();
-                        }
+                let reviews_url = format!(
+                    "https://api.github.com/repos/{}/pulls/{}/reviews",
+                    ctx.repo, ctx.number
+                );
+                let reviews_body = match self.http.get(
+                        &reviews_url,
+                        &[
+                            ("Authorization", &auth_header),
+                            ("Accept", "application/vnd.github+json"),
+                            ("User-Agent", "todomocop"),
+                        ],
+                    ) {
+                    Ok(body) => body,
+                    Err(_) => continue,
+                };
+                let reviews: Vec<serde_json::Value> = match serde_json::from_slice::<serde_json::Value>(&reviews_body)
+                    .ok()
+                    .and_then(|value| value.as_array().cloned())
+                {
+                    Some(reviews) => reviews,
+                    None => continue,
+                };
+                let mut review_state: HashMap<String, String> = reviews
+                    .into_iter()
+                    .filter_map(|review| {
+                        let login = review.get("user")?.get("login")?.as_str()?;
+                        let state = review.get("state")?.as_str()?;
+                        Some((login.to_string(), state.to_lowercase()))
+                    })
+                    .collect();
+                for reviewer in review_state.keys() {
+                    if !reviewers.contains(reviewer) {
+                        reviewers.push(reviewer.clone());
                     }
-                });
+                }
+                for reviewer in requested_reviewers {
+                    review_state.insert(reviewer, "pending".to_string());
+                }
+
+                let update = GithubPrContextUpdate {
+                    url: ctx.url.clone(),
+                    state: state.clone(),
+                    title: title.clone(),
+                    author: author.clone(),
+                    reviewers: reviewers.clone(),
+                    review_state: review_state.clone(),
+                };
+                self.update_github_pr_context(task.id, &update)?;
 
                 // Update in-memory context
                 ctx.state = state;
                 ctx.title = title;
-                ctx.last_refreshed = now;
+                ctx.author = author;
+                ctx.reviewers = reviewers;
+                ctx.review_state = review_state;
+                ctx.last_refreshed = Utc::now().to_rfc3339();
             }
         }
 

@@ -122,6 +122,16 @@ pub struct GithubPrContextData {
     pub last_refreshed: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubPrContextUpdate {
+    pub url: String,
+    pub state: String,
+    pub title: String,
+    pub author: String,
+    pub reviewers: Vec<String>,
+    pub review_state: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinearContextData {
     pub url: String,

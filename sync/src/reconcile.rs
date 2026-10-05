@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use todomocop_core::types::{Task, TaskStatus};
 
 use crate::types::{
-    CreateGithubLink, CreateLinearLink, GithubPr, GithubPrState, LinearIssue, SyncAction,
+    CreateGithubLink, CreateLinearLink, GithubPr, GithubPrState, LinearIssue, SourceTag,
+    SyncAction,
 };
 
 /// Reconcile GitHub PRs against existing tasks, producing sync actions.
@@ -12,7 +13,6 @@ use crate::types::{
 /// - Index existing tasks by their linked PR URLs
 /// - For each PR, determine role (author vs reviewer) and produce actions
 pub fn reconcile_github(prs: &[GithubPr], existing: &[Task], me: &str) -> Vec<SyncAction> {
-    // Index tasks by PR URL for quick lookup
     let mut task_by_pr_url: HashMap<&str, &Task> = HashMap::new();
     for task in existing {
         for ctx in &task.github_pr_contexts {
@@ -21,97 +21,177 @@ pub fn reconcile_github(prs: &[GithubPr], existing: &[Task], me: &str) -> Vec<Sy
     }
 
     let mut actions = Vec::new();
-    let mut handled_task_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
-
     for pr in prs {
-        let is_author = pr.author == me;
-        let is_reviewer = pr.reviewers.contains(&me.to_string());
-
-        if !is_author && !is_reviewer {
+        let Some(source) = github_source(pr, me) else {
+            continue;
+        };
+        if task_by_pr_url.contains_key(pr.url.as_str()) || pr.state != GithubPrState::Open {
             continue;
         }
 
-        match task_by_pr_url.get(pr.url.as_str()) {
-            None => {
-                // No existing task — skip if PR is already merged or closed
-                if pr.state != GithubPrState::Open {
-                    continue;
-                }
+        let title = if source == SourceTag::Review {
+            format!("Review: {}", pr.title)
+        } else {
+            pr.title.clone()
+        };
+        actions.push(SyncAction::CreateTaskWithGithub {
+            title,
+            pr: create_github_link(pr),
+            status: TaskStatus::Ready,
+            source,
+        });
+    }
 
-                let title = if is_reviewer && !is_author {
-                    format!("Review: {}", pr.title)
-                } else {
-                    pr.title.clone()
-                };
+    let pr_by_url: HashMap<&str, &GithubPr> =
+        prs.iter().map(|pr| (pr.url.as_str(), pr)).collect();
+    for task in existing {
+        if task.github_pr_contexts.is_empty()
+            || task.status == TaskStatus::Done
+            || task.status == TaskStatus::Canceled
+        {
+            continue;
+        }
 
-                actions.push(SyncAction::CreateTaskWithGithub {
-                    title,
-                    pr: CreateGithubLink {
-                        url: pr.url.clone(),
-                        repo: pr.repo.clone(),
-                        number: pr.number,
-                        title: pr.title.clone(),
-                        author: pr.author.clone(),
-                        reviewers: pr.reviewers.clone(),
-                        review_state: pr.review_state.clone(),
-                    },
-                    status: TaskStatus::Ready,
-                });
-            }
-            Some(task) => {
-                // Skip if we already emitted an action for this task
-                if handled_task_ids.contains(&task.id) {
-                    continue;
-                }
+        if let Some(action) = terminal_github_action(task, &pr_by_url) {
+            actions.push(action);
+            continue;
+        }
 
-                // Existing task — skip if already done or canceled
-                if task.status == TaskStatus::Done || task.status == TaskStatus::Canceled {
-                    continue;
-                }
-
-                // Reviewer task: check if review is no longer pending
-                if is_reviewer && !is_author {
-                    if let Some(state) = pr.review_state.get(me) {
-                        if state != "pending" {
-                            handled_task_ids.insert(task.id);
-                            actions.push(SyncAction::MarkDone { task_id: task.id });
-                        }
-                    }
-                    continue;
-                }
-
-                // Author task with Linear links: skip (Linear is authoritative)
-                if !task.linear_contexts.is_empty() {
-                    continue;
-                }
-
-                // Author task without Linear links: check if ALL non-closed PRs on this task are merged
-                let all_non_closed_merged = task.github_pr_contexts.iter().all(|ctx| {
-                    let pr_data = prs.iter().find(|p| p.url == ctx.url);
-                    match pr_data {
-                        Some(p) => p.state == GithubPrState::Merged || p.state == GithubPrState::Closed,
-                        None => ctx.state == "merged" || ctx.state == "closed",
-                    }
-                });
-
-                // Check that at least one PR is merged (not just all closed)
-                let any_merged = task.github_pr_contexts.iter().any(|ctx| {
-                    let pr_data = prs.iter().find(|p| p.url == ctx.url);
-                    match pr_data {
-                        Some(p) => p.state == GithubPrState::Merged,
-                        None => ctx.state == "merged",
-                    }
-                });
-
-                if all_non_closed_merged && any_merged {
-                    handled_task_ids.insert(task.id);
-                    actions.push(SyncAction::MarkDone { task_id: task.id });
-                }
-            }
+        let review_submitted = task.github_pr_contexts.iter().any(|context| {
+            pr_by_url.get(context.url.as_str()).is_some_and(|pr| {
+                github_source(pr, me) == Some(SourceTag::Review)
+                    && pr.review_state.get(me).is_some_and(|state| state != "pending")
+            })
+        });
+        if review_submitted {
+            actions.push(SyncAction::MarkDone { task_id: task.id });
         }
     }
 
     actions
+}
+
+pub fn reconcile_closed_github(prs: &[GithubPr], existing: &[Task]) -> Vec<SyncAction> {
+    let pr_by_url: HashMap<&str, &GithubPr> =
+        prs.iter().map(|pr| (pr.url.as_str(), pr)).collect();
+    existing
+        .iter()
+        .filter(|task| task.status != TaskStatus::Done && task.status != TaskStatus::Canceled)
+        .filter_map(|task| terminal_github_action(task, &pr_by_url))
+        .collect()
+}
+
+pub fn reconcile_github_contexts(prs: &[GithubPr], existing: &[Task]) -> Vec<SyncAction> {
+    let contexts_by_url: HashMap<&str, (i64, &todomocop_core::types::GithubPrContextData)> = existing
+        .iter()
+        .flat_map(|task| {
+            task.github_pr_contexts
+                .iter()
+                .map(move |ctx| (ctx.url.as_str(), (task.id, ctx)))
+        })
+        .collect();
+    prs.iter()
+        .filter_map(|pr| {
+            contexts_by_url.get(pr.url.as_str()).and_then(|(task_id, context)| {
+                let changed = context.state != pr.state.as_str()
+                    || context.title != pr.title
+                    || context.author != pr.author
+                    || context.reviewers != pr.reviewers
+                    || context.review_state != pr.review_state;
+                changed.then(|| SyncAction::UpdateGithubContext {
+                    task_id: *task_id,
+                    pr: create_github_link(pr),
+                    state: pr.state,
+                })
+            })
+        })
+        .collect()
+}
+
+pub fn reconcile_github_tags(prs: &[GithubPr], existing: &[Task], me: &str) -> Vec<SyncAction> {
+    let pr_by_url: HashMap<&str, &GithubPr> =
+        prs.iter().map(|pr| (pr.url.as_str(), pr)).collect();
+    let mut actions = Vec::new();
+    for task in existing {
+        for context in &task.github_pr_contexts {
+            let source = pr_by_url
+                .get(context.url.as_str())
+                .and_then(|pr| github_source(pr, me))
+                .or_else(|| github_context_source(context.author.as_str(), &context.reviewers, me));
+            if let Some(tag) = source {
+                if !task.tags.iter().any(|existing| existing.name == tag.as_str())
+                    && !actions.contains(&SyncAction::EnsureTag { task_id: task.id, tag })
+                {
+                    actions.push(SyncAction::EnsureTag { task_id: task.id, tag });
+                }
+            }
+        }
+    }
+    actions
+}
+
+pub fn reconcile_linear_tags(existing: &[Task]) -> Vec<SyncAction> {
+    existing
+        .iter()
+        .filter(|task| !task.linear_contexts.is_empty())
+        .filter(|task| !task.tags.iter().any(|tag| tag.name == SourceTag::Linear.as_str()))
+        .map(|task| SyncAction::EnsureTag {
+            task_id: task.id,
+            tag: SourceTag::Linear,
+        })
+        .collect()
+}
+
+fn create_github_link(pr: &GithubPr) -> CreateGithubLink {
+    CreateGithubLink {
+        url: pr.url.clone(),
+        repo: pr.repo.clone(),
+        number: pr.number,
+        title: pr.title.clone(),
+        author: pr.author.clone(),
+        reviewers: pr.reviewers.clone(),
+        review_state: pr.review_state.clone(),
+    }
+}
+
+fn github_source(pr: &GithubPr, me: &str) -> Option<SourceTag> {
+    github_context_source(&pr.author, &pr.reviewers, me)
+}
+
+fn github_context_source(author: &str, reviewers: &[String], me: &str) -> Option<SourceTag> {
+    if author == me {
+        Some(SourceTag::MyPr)
+    } else if reviewers.iter().any(|reviewer| reviewer == me) {
+        Some(SourceTag::Review)
+    } else {
+        None
+    }
+}
+
+fn terminal_github_action(
+    task: &Task,
+    pr_by_url: &HashMap<&str, &GithubPr>,
+) -> Option<SyncAction> {
+    if task.github_pr_contexts.is_empty() {
+        return None;
+    }
+    let states: Vec<&str> = task
+        .github_pr_contexts
+        .iter()
+        .map(|context| {
+            pr_by_url
+                .get(context.url.as_str())
+                .map_or(context.state.as_str(), |pr| pr.state.as_str())
+        })
+        .collect();
+    if !states.iter().all(|state| *state == "merged" || *state == "closed") {
+        return None;
+    }
+    if states.contains(&"merged") {
+        Some(SyncAction::MarkDone { task_id: task.id })
+    } else {
+        Some(SyncAction::MarkCanceled { task_id: task.id })
+    }
 }
 
 /// Reconcile Linear issues against existing tasks, producing sync actions.
@@ -344,9 +424,10 @@ mod tests {
         let actions = reconcile_github(&[pr], &[], ME);
         assert_eq!(actions.len(), 1);
         match &actions[0] {
-            SyncAction::CreateTaskWithGithub { title, status, .. } => {
+            SyncAction::CreateTaskWithGithub { title, status, source, .. } => {
                 assert_eq!(title, "Add feature");
                 assert_eq!(*status, TaskStatus::Ready);
+                assert_eq!(*source, SourceTag::MyPr);
             }
             other => panic!("expected CreateTaskWithGithub, got {other:?}"),
         }
@@ -367,9 +448,10 @@ mod tests {
         let actions = reconcile_github(&[pr], &[], ME);
         assert_eq!(actions.len(), 1);
         match &actions[0] {
-            SyncAction::CreateTaskWithGithub { title, status, .. } => {
+            SyncAction::CreateTaskWithGithub { title, status, source, .. } => {
                 assert_eq!(title, "Review: Fix bug");
                 assert_eq!(*status, TaskStatus::Ready);
+                assert_eq!(*source, SourceTag::Review);
             }
             other => panic!("expected CreateTaskWithGithub, got {other:?}"),
         }
@@ -439,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn authored_pr_merged_with_linear_no_done() {
+    fn authored_pr_merged_with_linear_marks_done() {
         let pr = make_pr(
             "https://github.com/owner/repo/pull/6",
             "Add feature",
@@ -455,11 +537,11 @@ mod tests {
         task.linear_contexts = vec![make_linear_ctx("ENG-100", "started")];
 
         let actions = reconcile_github(&[pr], &[task], ME);
-        assert!(actions.is_empty());
+        assert_eq!(actions, vec![SyncAction::MarkDone { task_id: 1 }]);
     }
 
     #[test]
-    fn pr_closed_not_merged_no_action() {
+    fn pr_closed_not_merged_marks_canceled() {
         let pr = make_pr(
             "https://github.com/owner/repo/pull/7",
             "Add feature",
@@ -474,7 +556,7 @@ mod tests {
         )];
 
         let actions = reconcile_github(&[pr], &[task], ME);
-        assert!(actions.is_empty());
+        assert_eq!(actions, vec![SyncAction::MarkCanceled { task_id: 1 }]);
     }
 
     #[test]
@@ -538,6 +620,89 @@ mod tests {
 
         let actions = reconcile_github(&[pr], &[], ME);
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn github_tag_repair_adds_source_tag_without_removing_user_tags() {
+        let mut pr = make_pr(
+            "https://github.com/owner/repo/pull/13",
+            "Fix bug",
+            GithubPrState::Open,
+            "other-dev",
+        );
+        pr.reviewers.push(ME.to_string());
+        let mut task = make_task(1, "Review: Fix bug", TaskStatus::Ready);
+        task.github_pr_contexts = vec![make_github_ctx(&pr.url, "open")];
+        task.tags.push(todomocop_core::types::TagData {
+            name: "user-tag".to_string(),
+            description: String::new(),
+        });
+
+        assert_eq!(
+            reconcile_github_tags(&[pr], &[task], ME),
+            vec![SyncAction::EnsureTag {
+                task_id: 1,
+                tag: SourceTag::Review,
+            }]
+        );
+    }
+
+    #[test]
+    fn github_tag_repair_is_idempotent() {
+        let pr = make_pr(
+            "https://github.com/owner/repo/pull/14",
+            "Add feature",
+            GithubPrState::Open,
+            ME,
+        );
+        let mut task = make_task(1, "Add feature", TaskStatus::Ready);
+        task.github_pr_contexts = vec![make_github_ctx(&pr.url, "open")];
+        task.tags.push(todomocop_core::types::TagData {
+            name: "my-pr".to_string(),
+            description: String::new(),
+        });
+
+        assert!(reconcile_github_tags(&[pr], &[task], ME).is_empty());
+    }
+
+    #[test]
+    fn github_context_repair_carries_identity_and_review_state() {
+        let mut pr = make_pr(
+            "https://github.com/owner/repo/pull/15",
+            "Fix bug",
+            GithubPrState::Open,
+            "other-dev",
+        );
+        pr.reviewers.push(ME.to_string());
+        pr.review_state.insert(ME.to_string(), "approved".to_string());
+        let mut task = make_task(1, "Review: Fix bug", TaskStatus::Ready);
+        task.github_pr_contexts = vec![make_github_ctx(&pr.url, "open")];
+
+        assert!(matches!(
+            reconcile_github_contexts(&[pr], &[task]).as_slice(),
+            [SyncAction::UpdateGithubContext { task_id: 1, pr, .. }]
+                if pr.author == "other-dev"
+                    && pr.reviewers == vec![ME.to_string()]
+                    && pr.review_state.get(ME).is_some_and(|state| state == "approved")
+        ));
+    }
+
+    #[test]
+    fn linear_tag_repair_is_idempotent() {
+        let mut task = make_task(1, "Linear task", TaskStatus::Ready);
+        task.linear_contexts = vec![make_linear_ctx("ENG-100", "started")];
+        assert_eq!(
+            reconcile_linear_tags(&[task.clone()]),
+            vec![SyncAction::EnsureTag {
+                task_id: 1,
+                tag: SourceTag::Linear,
+            }]
+        );
+        task.tags.push(todomocop_core::types::TagData {
+            name: "linear".to_string(),
+            description: String::new(),
+        });
+        assert!(reconcile_linear_tags(&[task]).is_empty());
     }
 
     // --- Linear tests ---

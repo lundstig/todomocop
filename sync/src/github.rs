@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use serde_json::Value;
 use todomocop_core::http::HttpClient;
+use todomocop_core::types::{Task, TaskStatus};
 
 use crate::types::{GithubPr, GithubPrState};
 
@@ -45,7 +46,6 @@ impl<'a> GithubClient<'a> {
             "type:pr+author:{user}+is:merged+merged:>={since}"
         ))?;
 
-        // Collect review-requested URLs for detection later
         let review_requested_urls: std::collections::HashSet<String> =
             review_requested.iter().map(|pr| pr.url.clone()).collect();
 
@@ -59,17 +59,51 @@ impl<'a> GithubClient<'a> {
             seen.entry(pr.url.clone()).or_insert(pr);
         }
 
-        // For review-requested PRs, fetch actual reviews and set reviewers = [me]
         let mut result: Vec<GithubPr> = Vec::with_capacity(seen.len());
-        for (url, mut pr) in seen {
-            if review_requested_urls.contains(&url) {
-                pr.reviewers = vec![self.user.clone()];
-                pr.review_state = self.fetch_reviews(&pr.repo, pr.number)?;
+        for (url, pr) in seen {
+            let mut hydrated = self.fetch_pr(&pr.repo, pr.number)?;
+            if review_requested_urls.contains(&url) && !hydrated.reviewers.contains(&self.user) {
+                hydrated.reviewers.push(self.user.clone());
             }
-            result.push(pr);
+            result.push(hydrated);
         }
 
         Ok(result)
+    }
+
+    pub fn fetch_linked_prs(&self, tasks: &[Task]) -> Result<Vec<GithubPr>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut prs = Vec::new();
+        for task in tasks {
+            if task.status == TaskStatus::Done || task.status == TaskStatus::Canceled {
+                continue;
+            }
+            for context in &task.github_pr_contexts {
+                if seen.insert(context.url.clone()) {
+                    prs.push(self.fetch_pr(&context.repo, context.number)?);
+                }
+            }
+        }
+        Ok(prs)
+    }
+
+    fn fetch_pr(&self, repo: &str, number: i64) -> Result<GithubPr> {
+        let url = format!("https://api.github.com/repos/{repo}/pulls/{number}");
+        let h = github_headers(&self.token);
+        let resp = self.http.get(&url, &headers_ref(&h))?;
+        let json: Value = serde_json::from_slice(&resp).context("parse pull response")?;
+        let mut pr = parse_pr_item(&json).context("invalid pull response")?;
+        let requested_reviewers = pr.reviewers.clone();
+        pr.review_state = self.fetch_reviews(repo, number)?;
+        for reviewer in pr.review_state.keys() {
+            if !pr.reviewers.contains(reviewer) {
+                pr.reviewers.push(reviewer.clone());
+            }
+        }
+        for reviewer in requested_reviewers {
+            pr.review_state.insert(reviewer, "pending".to_string());
+        }
+        Ok(pr)
     }
 
     fn search_prs(&self, query: &str) -> Result<Vec<GithubPr>> {
@@ -147,10 +181,11 @@ fn parse_pr_item(item: &Value) -> Option<GithubPr> {
     let title = item["title"].as_str()?.to_string();
     let author = item["user"]["login"].as_str().unwrap_or("").to_string();
     let state_str = item["state"].as_str().unwrap_or("open");
-    let merged_at = &item["pull_request"]["merged_at"];
+    let merged = item["merged"].as_bool().unwrap_or(false)
+        || item["pull_request"]["merged_at"].is_string();
 
     let state = if state_str == "closed" {
-        if merged_at.is_string() {
+        if merged {
             GithubPrState::Merged
         } else {
             GithubPrState::Closed
@@ -159,6 +194,14 @@ fn parse_pr_item(item: &Value) -> Option<GithubPr> {
         GithubPrState::Open
     };
 
+    let reviewers = item["requested_reviewers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|reviewer| reviewer["login"].as_str())
+        .map(str::to_owned)
+        .collect();
+
     Some(GithubPr {
         url: url.to_string(),
         repo,
@@ -166,7 +209,18 @@ fn parse_pr_item(item: &Value) -> Option<GithubPr> {
         title,
         state,
         author,
-        reviewers: vec![],
+        reviewers,
         review_state: HashMap::new(),
     })
+}
+
+pub fn merge_prs(discovered: Vec<GithubPr>, linked: Vec<GithubPr>) -> Vec<GithubPr> {
+    let mut by_url: HashMap<String, GithubPr> = discovered
+        .into_iter()
+        .map(|pr| (pr.url.clone(), pr))
+        .collect();
+    for pr in linked {
+        by_url.insert(pr.url.clone(), pr);
+    }
+    by_url.into_values().collect()
 }
