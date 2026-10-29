@@ -198,7 +198,7 @@ struct DeleteTaskParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ListTasksParams {
-    #[schemars(description = "Filter by status: idea, ready, working, done, or canceled")]
+    #[schemars(description = "Filter by status: idea, ready, working, done, or canceled. Without it, only ready and working tasks are listed.")]
     status: Option<String>,
     #[schemars(description = "Filter by workspace")]
     workspace: Option<String>,
@@ -425,7 +425,11 @@ impl TodomocopServer {
         };
 
         let result = self.db.run(move |db| {
-            let tasks = db.list_tasks(filter)?;
+            let mut tasks = db.list_tasks(filter)?;
+            // Ideas are write-only and closed tasks are history: ask by status to see them.
+            if status.is_none() {
+                tasks.retain(|task| matches!(task.status, TaskStatus::Ready | TaskStatus::Working));
+            }
             if verbose {
                 Ok(serde_json::to_string_pretty(&tasks)?)
             } else {
