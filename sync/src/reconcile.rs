@@ -65,6 +65,18 @@ pub fn reconcile_github(prs: &[GithubPr], existing: &[Task], me: &str) -> Vec<Sy
         });
         if review_submitted {
             actions.push(SyncAction::MarkDone { task_id: task.id });
+            continue;
+        }
+
+        // Someone else reviewed, or the request was withdrawn: the task would never close.
+        let review_withdrawn = task.tags.iter().any(|tag| tag.name == SourceTag::Review.as_str())
+            && task.github_pr_contexts.iter().all(|context| {
+                pr_by_url
+                    .get(context.url.as_str())
+                    .is_some_and(|pr| !pr.reviewers.iter().any(|reviewer| reviewer == me))
+            });
+        if review_withdrawn {
+            actions.push(SyncAction::MarkCanceled { task_id: task.id });
         }
     }
 
@@ -489,6 +501,29 @@ mod tests {
 
         let actions = reconcile_github(&[pr], &[task], ME);
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn review_no_longer_requested_cancels() {
+        let pr = make_pr(
+            "https://github.com/owner/repo/pull/4",
+            "Fix bug",
+            GithubPrState::Open,
+            "other-dev",
+        );
+
+        let mut task = make_task(1, "Review: Fix bug", TaskStatus::Ready);
+        task.tags = vec![todomocop_core::types::TagData {
+            name: SourceTag::Review.as_str().to_string(),
+            description: String::new(),
+        }];
+        task.github_pr_contexts = vec![make_github_ctx(
+            "https://github.com/owner/repo/pull/4",
+            "open",
+        )];
+
+        let actions = reconcile_github(&[pr], &[task], ME);
+        assert_eq!(actions, vec![SyncAction::MarkCanceled { task_id: 1 }]);
     }
 
     #[test]

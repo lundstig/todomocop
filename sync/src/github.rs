@@ -40,7 +40,7 @@ impl<'a> GithubClient<'a> {
             "type:pr+author:{user}+is:open"
         ))?;
         let review_requested = self.search_prs(&format!(
-            "type:pr+review-requested:{user}+is:open"
+            "type:pr+user-review-requested:{user}+is:open"
         ))?;
         let authored_merged = self.search_prs(&format!(
             "type:pr+author:{user}+is:merged+merged:>={since}"
